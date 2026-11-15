@@ -20,6 +20,7 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ScrollView
 import android.widget.TextView
 import org.json.JSONArray
 import org.json.JSONObject
@@ -56,6 +57,7 @@ class PlayerActivity : Activity() {
     private lateinit var overlay: FrameLayout
     private lateinit var sheet: LinearLayout
     private lateinit var trackList: LinearLayout
+    private lateinit var trackPanel: ScrollView
     private lateinit var bar: ProgressView
     private lateinit var elapsed: TextView
     private lateinit var duration: TextView
@@ -186,17 +188,22 @@ class PlayerActivity : Activity() {
 
         trackList = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            visibility = View.GONE
             setPadding(16, 16, 16, 16)
+        }
+        // A film can carry forty subtitle tracks; the panel scrolls rather than running
+        // off the screen.
+        trackPanel = ScrollView(this).apply {
+            visibility = View.GONE
             background = GradientDrawable().apply {
                 setColor(Color.parseColor("#171b22"))
                 cornerRadius = 20f
                 setStroke(2, Color.parseColor("#232c37"))
             }
+            isFocusable = false
+            addView(trackList)
         }
-        overlay.addView(trackList, FrameLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            Gravity.CENTER).apply { setMargins(40, 40, 40, 40) })
+        overlay.addView(trackPanel, FrameLayout.LayoutParams(
+            dp(620), dp(760), Gravity.CENTER).apply { setMargins(40, 40, 40, 40) })
     }
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
@@ -467,7 +474,13 @@ class PlayerActivity : Activity() {
             tracks[it].trackType in setOf(MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_SUBTITLE,
                                           MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT)
         }
-        val choices = tracks.indices.filter { tracks[it].trackType in wanted }
+        var choices = tracks.indices.filter { tracks[it].trackType in wanted }
+        if (kind == TrackKind.SUBTITLE) {
+            choices = choices.sortedBy { index ->
+                val language = tracks[index].language ?: ""
+                if (language.startsWith("en")) 0 else 1
+            }
+        }
         if (choices.isEmpty()) {
             titleView.text = if (kind == TrackKind.AUDIO) "No other audio tracks" else "No subtitles in this file"
             titleView.setTextColor(Color.parseColor(DIM))
@@ -499,7 +512,7 @@ class PlayerActivity : Activity() {
                 closeTracks()
             })
         }
-        trackList.visibility = View.VISIBLE
+        trackPanel.visibility = View.VISIBLE
         sheet.visibility = View.GONE
         titleView.visibility = View.GONE
         trackList.getChildAt(1)?.requestFocus()
@@ -539,7 +552,7 @@ class PlayerActivity : Activity() {
 
     private fun closeTracks() {
         picking = null
-        trackList.visibility = View.GONE
+        trackPanel.visibility = View.GONE
         trackList.removeAllViews()
         sheet.visibility = View.VISIBLE
         titleView.visibility = View.VISIBLE
