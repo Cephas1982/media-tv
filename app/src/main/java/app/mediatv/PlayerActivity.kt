@@ -56,6 +56,7 @@ class PlayerActivity : Activity() {
     private var player: MediaPlayer? = null
     private var title = ""
     private var durationMs = 0
+    private var selectedTrack = -1
     private var controlsVisible = true
     private var picking: TrackKind? = null
     private val main = Handler(Looper.getMainLooper())
@@ -248,7 +249,7 @@ class PlayerActivity : Activity() {
             if (info.trackType == MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO) {
                 val language = info.language ?: "und"
                 if (language.startsWith("en") && index != 0) {
-                    runCatching { media.selectTrack(index) }
+                    if (runCatching { media.selectTrack(index) }.isSuccess) selectedTrack = index
                 }
             }
         }
@@ -263,7 +264,7 @@ class PlayerActivity : Activity() {
     private fun skip(delta: Int) {
         val media = player ?: return
         val target = (media.currentPosition + delta).coerceIn(0, maxOf(0, durationMs - 1000))
-        media.seekTo(target, MediaPlayer.SEEK_CLOSEST_SYNC)
+        media.seekTo(target.toLong(), MediaPlayer.SEEK_CLOSEST_SYNC)
         refreshProgress()
     }
 
@@ -295,7 +296,7 @@ class PlayerActivity : Activity() {
         val wanted = when (kind) {
             TrackKind.AUDIO -> setOf(MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO)
             TrackKind.SUBTITLE -> setOf(MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_SUBTITLE,
-                                        MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_TEXT)
+                                        MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT)
         }
         val choices = tracks.mapIndexedNotNull { index, info ->
             if (info.trackType in wanted) index to info else null
@@ -310,15 +311,16 @@ class PlayerActivity : Activity() {
         picking = kind
         trackList.removeAllViews()
         trackList.addView(sheetHeading(if (kind == TrackKind.AUDIO) "Audio" else "Subtitles"))
-        trackList.addView(trackItem("Off", selected = false) {
+        trackList.addView(trackItem("Off", selected = selectedTrack < 0) {
             runCatching { media.selectTrack(-1) }
+            selectedTrack = -1
             closeTracks()
-        }, 0)
+        })
         choices.forEach { (index, info) ->
             val label = describe(info, index)
-            val active = runCatching { media.selectedTrack == index }.getOrDefault(false)
-            trackList.addView(trackItem(label, active) {
+            trackList.addView(trackItem(label, selectedTrack == index) {
                 runCatching { media.selectTrack(index) }
+                selectedTrack = index
                 closeTracks()
             })
         }
