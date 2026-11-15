@@ -1,0 +1,35 @@
+name: Build APK
+
+# Builds the TV app on a GitHub runner so no Android SDK, Gradle or JDK has to live on
+# Lee's machines. Dispatch it from the Actions tab; the APK comes back as an artifact.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  apk:
+    name: TV app (debug APK)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install the SDK pieces this app compiles against
+        run: yes | sdkmanager --install "platforms;android-34" "build-tools;34.0.0" > /dev/null
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+      - name: Build
+        run: gradle assembleDebug --no-daemon --console=plain
+      - uses: actions/upload-artifact@v4
+        with:
+          name: media-tv-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 30
