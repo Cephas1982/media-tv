@@ -373,6 +373,11 @@ class PlayerActivity : Activity() {
     // ------------------------------------------------------------------ what follows
     private fun onFinished() {
         reportProgress(played = true)
+        advance()
+    }
+
+    // Used by the remote's next-track key: move on without claiming the episode was watched.
+    private fun advance() {
         val next = nextUp
         val id = next?.optString("id") ?: ""
         if (id.isNotEmpty()) {
@@ -583,6 +588,7 @@ class PlayerActivity : Activity() {
             KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE -> { togglePlay(); showControls(); return true }
             KeyEvent.KEYCODE_MEDIA_REWIND -> { skip(-30_000); showControls(); return true }
             KeyEvent.KEYCODE_MEDIA_FAST_FORWARD -> { skip(30_000); showControls(); return true }
+            KeyEvent.KEYCODE_MEDIA_NEXT -> { advance(); return true }
         }
 
         if (!controlsVisible) {
