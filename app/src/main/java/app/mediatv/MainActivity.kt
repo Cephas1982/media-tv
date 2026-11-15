@@ -30,6 +30,7 @@ class MainActivity : Activity() {
 
     companion object {
         // All three are served by the NUC. The TV draws the frame; the logic stays there.
+        private const val HOME_URL = "http://192.168.1.121:3012/tv"
         private const val WATCH_URL = "http://192.168.1.121:8096/web/"
         private const val ASK_URL = "http://192.168.1.121:3012/"
         private const val RECENT_URL = "http://192.168.1.121:3012/recent"
@@ -38,6 +39,7 @@ class MainActivity : Activity() {
     }
 
     private lateinit var web: WebView
+    private lateinit var bar: LinearLayout
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -47,16 +49,16 @@ class MainActivity : Activity() {
             setBackgroundColor(Color.parseColor("#111318"))
         }
 
-        val bar = LinearLayout(this).apply {
+        bar = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.START or Gravity.CENTER_VERTICAL
             setPadding(24, 12, 24, 12)
         }
 
-        val watch = menuButton("Watch") { load(WATCH_URL) }
-        bar.addView(watch)
+        val home = menuButton("TV") { load(HOME_URL) }
+        bar.addView(home)
+        bar.addView(menuButton("Watch") { load(WATCH_URL) })
         bar.addView(menuButton("Ask") { load(ASK_URL) })
-        bar.addView(menuButton("Recent") { load(RECENT_URL) })
         bar.addView(menuButton("Talk") { listen() })
         bar.addView(menuButton("Reload") { web.reload() })
 
@@ -92,8 +94,7 @@ class MainActivity : Activity() {
         root.addView(web, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
         setContentView(root)
-        watch.requestFocus()
-        load(WATCH_URL)
+        load(HOME_URL)
     }
 
     private fun menuButton(label: String, onClick: () -> Unit): Button =
@@ -186,12 +187,18 @@ class MainActivity : Activity() {
         return super.dispatchKeyEvent(event)
     }
 
+    // Back walks up rather than out: page history first, then the toolbar (so the tabs are
+    // always reachable once the page owns the D-pad), and only then the app itself.
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        // Back closes what the page has open before it closes the app, so a viewer never
-        // lands on the launcher by accident mid-film.
-        if (keyCode == KeyEvent.KEYCODE_BACK && web.canGoBack()) {
-            web.goBack()
-            return true
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            if (web.hasFocus() && web.canGoBack()) {
+                web.goBack()
+                return true
+            }
+            if (web.hasFocus()) {
+                bar.getChildAt(0)?.requestFocus()
+                return true
+            }
         }
         return super.onKeyDown(keyCode, event)
     }
