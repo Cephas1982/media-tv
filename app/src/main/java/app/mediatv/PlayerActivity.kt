@@ -2,12 +2,14 @@ package app.mediatv
 
 import android.app.Activity
 import android.graphics.Color
+import android.graphics.Canvas
+import android.graphics.Paint
 import android.graphics.drawable.GradientDrawable
+import android.content.Context
 import android.media.MediaPlayer
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
-import android.util.TypedValue
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.SurfaceHolder
@@ -17,7 +19,6 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
-import android.widget.ProgressBar
 import android.widget.TextView
 import java.util.Locale
 
@@ -45,7 +46,7 @@ class PlayerActivity : Activity() {
     private lateinit var overlay: FrameLayout
     private lateinit var sheet: LinearLayout          // the bottom control panel
     private lateinit var trackList: LinearLayout      // audio / subtitle chooser
-    private lateinit var bar: ProgressBar
+    private lateinit var bar: ProgressView
     private lateinit var elapsed: TextView
     private lateinit var duration: TextView
     private lateinit var titleView: TextView
@@ -130,18 +131,14 @@ class PlayerActivity : Activity() {
         }
         elapsed = timeText("0:00")
         duration = timeText("0:00")
-        bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
-            max = 1000
-            progressTintList = android.content.res.ColorStateList.valueOf(Color.parseColor(ACCENT))
-            // The unfilled track has to read too: on a dark panel #2a313c is invisible.
-            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#46505f"))
+        bar = ProgressView(this).apply {
             isFocusable = true
             setOnFocusChangeListener { _, focused -> if (focused) flash() }
         }
         timing.addView(elapsed, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         // A bar with real height: at ten feet the default one pixed tall reads as nothing.
-        timing.addView(bar, LinearLayout.LayoutParams(0, dp(14), 1f)
+        timing.addView(bar, LinearLayout.LayoutParams(0, dp(22), 1f)
             .apply { marginStart = dp(18); marginEnd = dp(18) })
         timing.addView(duration, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -179,6 +176,25 @@ class PlayerActivity : Activity() {
     }
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+
+    /** A scrub bar drawn by hand: the platform's is too thin to see at ten feet. */
+    private inner class ProgressView(context: Context) : View(context) {
+        var fraction = 0f
+        private val track = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#5b6678") }
+        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor(ACCENT) }
+
+        override fun onDraw(canvas: Canvas) {
+            val height = dp(9).toFloat()
+            val middle = this.height / 2f
+            val radius = height / 2f
+            canvas.drawRoundRect(0f, middle - radius, this.width.toFloat(), middle + radius,
+                                 radius, radius, track)
+            if (fraction > 0f) {
+                canvas.drawRoundRect(0f, middle - radius, this.width * fraction, middle + radius,
+                                     radius, radius, fill)
+            }
+        }
+    }
 
     private fun timeText(value: String) = TextView(this).apply {
         text = value
@@ -281,7 +297,8 @@ class PlayerActivity : Activity() {
         val media = player ?: return
         val position = runCatching { media.currentPosition }.getOrDefault(0)
         if (durationMs > 0) {
-            bar.progress = (1000L * position / durationMs).toInt().coerceIn(0, 1000)
+            bar.fraction = (position.toFloat() / durationMs).coerceIn(0f, 1f)
+            bar.invalidate()
         }
         elapsed.text = clock(position)
         updatePlayButton()
