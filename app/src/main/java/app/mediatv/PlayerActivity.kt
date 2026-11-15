@@ -281,7 +281,7 @@ class PlayerActivity : Activity() {
         player = media
         try {
             for ((_, file) in subs) {
-                runCatching { media.addTimedTextSource(file.absolutePath, MediaPlayer.MEDIA_MIMETYPE_TEXT_VTT) }
+                runCatching { media.addTimedTextSource(file.absolutePath, "text/vtt") }
             }
             media.setDataSource(APP + "/api/stream/" + id)
             media.setSurface(holder.surface)
@@ -381,7 +381,7 @@ class PlayerActivity : Activity() {
         val next = nextUp
         val id = next?.optString("id") ?: ""
         if (id.isNotEmpty()) {
-            val label = next.optString("title")
+            val label = next?.optString("title") ?: ""
             main.removeCallbacks(saver)
             main.post(saver)
             open(id, label, surface.holder)
