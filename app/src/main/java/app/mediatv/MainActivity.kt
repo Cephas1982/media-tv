@@ -59,7 +59,7 @@ class MainActivity : Activity() {
         bar.addView(home)
         bar.addView(menuButton("Watch") { load(WATCH_URL) })
         bar.addView(menuButton("Ask") { load(ASK_URL) })
-        bar.addView(menuButton("Talk") { listen() })
+        bar.addView(menuButton("Talk") { askAndListen() })
         bar.addView(menuButton("Reload") { web.reload() })
 
         root.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
@@ -142,6 +142,24 @@ class MainActivity : Activity() {
      * remote mic directly, but they can ask the recognizer that can, and put the
      * transcript into the focused field.
      */
+    /**
+     * One press for the whole conversation: bring Media Desk up, wait for it to settle,
+     * then listen with the recognizer. The transcript lands in the box and is sent, so a
+     * viewer says a sentence and reads an answer.
+     */
+    private fun askAndListen() {
+        load(ASK_URL)
+        web.postDelayed({ listen() }, 1600)
+    }
+
+    private fun submit() {
+        web.evaluateJavascript(
+            "(function(){var b=Array.prototype.slice.call(document.querySelectorAll('button'))" +
+            ".filter(function(x){return /send/i.test(x.getAttribute('aria-label')||x.textContent||'');})[0];" +
+            "if(b){b.click();return 'sent';}return 'nosend';})()"
+        ) { result -> Log.d(TAG, "submit -> " + result) }
+    }
+
     private fun listen() {
         val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
         intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
@@ -160,6 +178,8 @@ class MainActivity : Activity() {
         val said = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull() ?: return
         Log.d(TAG, "heard: " + said)
         inject(said)
+        // Give React a moment to take the text before pressing its own Send.
+        web.postDelayed({ submit() }, 400)
     }
 
     // A WebView consumes arrow keys for its own scrolling, which on a television means the
