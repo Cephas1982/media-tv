@@ -139,8 +139,9 @@ class PlayerActivity : Activity() {
         }
         timing.addView(elapsed, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        timing.addView(bar, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-            .apply { marginStart = 16; marginEnd = 16 })
+        // A bar with real height: at ten feet the default one pixed tall reads as nothing.
+        timing.addView(bar, LinearLayout.LayoutParams(0, dp(12), 1f)
+            .apply { marginStart = dp(18); marginEnd = dp(18) })
         timing.addView(duration, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         sheet.addView(timing)
@@ -175,6 +176,8 @@ class PlayerActivity : Activity() {
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             Gravity.CENTER).apply { setMargins(40, 40, 40, 40) })
     }
+
+    private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
     private fun timeText(value: String) = TextView(this).apply {
         text = value
