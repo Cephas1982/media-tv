@@ -74,6 +74,11 @@ class MainActivity : Activity() {
             }
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = false
+                // The page is the thing the remote should drive, so it takes the focus
+                // as soon as it is on screen.
+                override fun onPageFinished(view: WebView, url: String) {
+                    view.requestFocus()
+                }
             }
             // Page console goes to logcat, so a page-side bug is visible with adb logcat.
             webChromeClient = object : WebChromeClient() {
@@ -156,9 +161,25 @@ class MainActivity : Activity() {
         inject(said)
     }
 
-    // Back closes what the page has open before it closes the app, so a viewer never
-    // lands on the launcher by accident mid-film.
+    // A WebView consumes arrow keys for its own scrolling, which on a television means the
+    // page moves instead of the row. While the page has focus the D-pad is therefore
+    // forwarded to the page's own navigation; the toolbar keeps normal focus movement.
+    private fun direction(keyCode: Int): String? = when (keyCode) {
+        KeyEvent.KEYCODE_DPAD_RIGHT -> "right"
+        KeyEvent.KEYCODE_DPAD_LEFT -> "left"
+        KeyEvent.KEYCODE_DPAD_UP -> "up"
+        KeyEvent.KEYCODE_DPAD_DOWN -> "down"
+        else -> null
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        val way = direction(keyCode)
+        if (way != null && web.hasFocus()) {
+            web.evaluateJavascript("window.tvNav && window.tvNav('" + way + "')", null)
+            return true
+        }
+        // Back closes what the page has open before it closes the app, so a viewer never
+        // lands on the launcher by accident mid-film.
         if (keyCode == KeyEvent.KEYCODE_BACK && web.canGoBack()) {
             web.goBack()
             return true
