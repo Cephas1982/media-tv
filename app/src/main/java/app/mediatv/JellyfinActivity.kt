@@ -39,7 +39,7 @@ class JellyfinActivity : Activity() {
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = false
             }
-            webChromeClient = object : WebChromeClient()
+            webChromeClient = object : WebChromeClient() {}
             WebView.setWebContentsDebuggingEnabled(true)
         }
         setContentView(web)
