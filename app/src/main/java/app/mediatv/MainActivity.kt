@@ -172,12 +172,21 @@ class MainActivity : Activity() {
         else -> null
     }
 
-    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        val way = direction(keyCode)
+    // A WebView consumes a D-pad key before the Activity sees it, so onKeyDown never runs
+    // for an arrow while the page has focus. dispatchKeyEvent comes first, which is the
+    // only place this can be intercepted.
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        val way = direction(event.keyCode)
         if (way != null && web.hasFocus()) {
-            web.evaluateJavascript("window.tvNav && window.tvNav('" + way + "')", null)
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                web.evaluateJavascript("window.tvNav && window.tvNav('" + way + "')", null)
+            }
             return true
         }
+        return super.dispatchKeyEvent(event)
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         // Back closes what the page has open before it closes the app, so a viewer never
         // lands on the launcher by accident mid-film.
         if (keyCode == KeyEvent.KEYCODE_BACK && web.canGoBack()) {
