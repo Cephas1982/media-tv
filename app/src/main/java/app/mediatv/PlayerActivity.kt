@@ -54,6 +54,7 @@ class PlayerActivity : Activity() {
     }
 
     private lateinit var surface: SurfaceView
+    private lateinit var root: FrameLayout
     private lateinit var overlay: FrameLayout
     private lateinit var sheet: LinearLayout
     private lateinit var trackList: LinearLayout
@@ -63,6 +64,7 @@ class PlayerActivity : Activity() {
     private lateinit var elapsed: TextView
     private lateinit var duration: TextView
     private lateinit var titleView: TextView
+    private lateinit var subtitleView: TextView
     private lateinit var playButton: TextView
     private lateinit var audioButton: TextView
     private lateinit var subsButton: TextView
@@ -75,7 +77,16 @@ class PlayerActivity : Activity() {
     private var controlsVisible = true
     private var picking: TrackKind? = null
     private var selectedTrack = -1
-    private var externalSubs: List<Pair<String, File>> = emptyList()
+    private var availableSubs: List<Triple<Int, String, String>> = emptyList()
+    private var activeSub = -1              // stream index chosen by the viewer, -1 for none
+    private var resumeAt = 0                // where to start, for a restart after a change
+    private var firstResume = 0             // the intent's resume point, used once
+    private var cues: List<Cue> = emptyList()
+    private var menuIndex = 0
+    private var menuActions: List<() -> Unit> = emptyList()
+    private var menuRows: List<TextView> = emptyList()
+
+    private data class Cue(val start: Int, val end: Int, val text: String)
     private var nextUp: JSONObject? = null
     private var lastSaved = 0L
     private val main = Handler(Looper.getMainLooper())
@@ -104,9 +115,10 @@ class PlayerActivity : Activity() {
         title = intent.getStringExtra("title") ?: ""
         itemId = url.substringAfterLast('/').substringBefore('?')
         who = intent.getStringExtra("who") ?: "together"
+        firstResume = intent.getIntExtra("resume", 0)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
-        val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
+        root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         surface = SurfaceView(this)
         root.addView(surface, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
@@ -114,10 +126,11 @@ class PlayerActivity : Activity() {
         root.addView(overlay, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         buildOverlay()
+        root.bringChildToFront(subtitleView)
         setContentView(root)
 
         surface.holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(holder: SurfaceHolder) = open(itemId, title, holder)
+            override fun surfaceCreated(holder: SurfaceHolder) = open(itemId, title, holder, firstResume)
             override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, hh: Int) {}
             override fun surfaceDestroyed(holder: SurfaceHolder) {}
         })
@@ -127,6 +140,18 @@ class PlayerActivity : Activity() {
 
     // ------------------------------------------------------------------ the controls
     private fun buildOverlay() {
+        subtitleView = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 26f
+            gravity = Gravity.CENTER
+            setShadowLayer(10f, 0f, 3f, Color.BLACK)
+            setLineSpacing(4f, 1f)
+            maxWidth = resources.displayMetrics.widthPixels * 3 / 4
+        }
+        root.addView(subtitleView, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(120) })
+
         titleView = TextView(this).apply {
             text = title
             setTextColor(Color.parseColor(INK))
@@ -278,35 +303,34 @@ class PlayerActivity : Activity() {
      * hand everything to the platform player. Both answers are cheap and cached, and they
      * are what let the player show external subtitles and start the next episode itself.
      */
-    private fun open(id: String, label: String, holder: SurfaceHolder) {
+    private fun open(id: String, label: String, holder: SurfaceHolder, resumeMs: Int = -1) {
         itemId = id
         title = label
         titleView.text = label
+        // A resume point belongs to exactly one open: reusing the intent's would seek the
+        // next episode to the last one's position and end it immediately.
+        resumeAt = if (resumeMs >= 0) resumeMs else 0
+        // Playback starts at once. Subtitles are fetched on demand, because extracting a
+        // track out of a Matroska file costs Jellyfin a minute the first time, and nobody
+        // wants to wait that to watch a film.
+        start(id, holder)
         Thread {
-            val subs = fetchSubtitles(id)
-            val next = fetchNext(id)
-            runOnUiThread { start(id, subs, next, holder) }
+            nextUp = fetchNext(id)
+            availableSubs = fetchSubtitleList(id)
         }.start()
     }
 
-    private fun start(id: String, subs: List<Pair<String, File>>, next: JSONObject?,
-                      holder: SurfaceHolder) {
-        externalSubs = subs
-        nextUp = next
+    private fun start(id: String, holder: SurfaceHolder) {
         releasePlayer()
         val media = MediaPlayer()
         player = media
         try {
-            for ((_, file) in subs) {
-                runCatching { media.addTimedTextSource(file.absolutePath, "text/vtt") }
-            }
             media.setDataSource(APP + "/api/stream/" + id)
             media.setSurface(holder.surface)
             media.setOnPreparedListener {
                 durationMs = it.duration
                 duration.text = clock(durationMs)
-                val resume = intent.getIntExtra("resume", 0)
-                if (resume > 5000 && resume < durationMs - 20000) it.seekTo(resume)
+                if (resumeAt > 5000 && resumeAt < durationMs - 20000) it.seekTo(resumeAt)
                 applyDefaultTracks()
                 it.start()
                 updatePlayButton()
@@ -378,6 +402,57 @@ class PlayerActivity : Activity() {
         }
         elapsed.text = clock(position)
         updatePlayButton()
+        if (cues.isNotEmpty()) {
+            val cue = cues.firstOrNull { position >= it.start && position <= it.end }
+            val wanted = cue?.text ?: ""
+            if (subtitleView.text.toString() != wanted) subtitleView.text = wanted
+        } else if (subtitleView.text.isNotEmpty()) {
+            subtitleView.text = ""
+        }
+    }
+
+    /** WebVTT in, cues out. Jellyfin emits one file per subtitle track, already in VTT. */
+    /**
+     * Subtitles are drawn here, not by the platform: its timed-text path stalls this
+     * stream, and drawing them means changing tracks never interrupts the film.
+     */
+    private fun applySubtitle(index: Int) {
+        Log.d(TAG, "subtitle -> " + index)
+        activeSub = index
+        closeTracks()
+        cues = emptyList()
+        subtitleView.text = ""
+        if (index < 0) return
+        Thread {
+            val file = subtitleFile(itemId, index)
+            val parsed = file?.let { parseVtt(it.readText()) } ?: emptyList()
+            Log.d(TAG, "cues loaded: " + parsed.size)
+            runOnUiThread { cues = parsed }
+        }.start()
+    }
+
+    /** WebVTT in, cues out. Jellyfin emits one file per subtitle track, already in VTT. */
+    private fun parseVtt(text: String): List<Cue> {
+        val stamp = Regex("""(?:(\d+):)?(\d{1,2}):(\d{2})\.(\d{1,3})""")
+        fun toMs(groups: MatchResult): Int {
+            val hours = groups.groupValues[1].toIntOrNull() ?: 0
+            val minutes = groups.groupValues[2].toInt()
+            val seconds = groups.groupValues[3].toInt()
+            val millis = groups.groupValues[4].padEnd(3, '0').toInt()
+            return ((hours * 60 + minutes) * 60 + seconds) * 1000 + millis
+        }
+        val out = mutableListOf<Cue>()
+        text.replace("\r\n", "\n").split("\n\n").forEach { block ->
+            val lines = block.trim().split("\n")
+            val arrow = lines.indexOfFirst { it.contains("-->") }
+            if (arrow < 0) return@forEach
+            val times = stamp.findAll(lines[arrow]).toList()
+            if (times.size < 2) return@forEach
+            val body = lines.drop(arrow + 1).joinToString("\n")
+                .replace(Regex("<[^>]*>"), "").trim()
+            if (body.isNotEmpty()) out.add(Cue(toMs(times[0]), toMs(times[1]), body))
+        }
+        return out.sortedBy { it.start }
     }
 
     private fun clock(ms: Int): String {
@@ -401,7 +476,7 @@ class PlayerActivity : Activity() {
             val label = next?.optString("title") ?: ""
             main.removeCallbacks(saver)
             main.post(saver)
-            open(id, label, surface.holder)
+            open(id, label, surface.holder, 0)
         } else {
             finish()
         }
@@ -438,20 +513,25 @@ class PlayerActivity : Activity() {
         if (json.optString("id").isEmpty()) null else json
     }.getOrNull()
 
-    private fun fetchSubtitles(id: String): List<Pair<String, File>> = runCatching {
+    private fun fetchSubtitleList(id: String): List<Triple<Int, String, String>> = runCatching {
         val list = JSONArray(get(APP + "/api/subs/" + id))
-        val out = mutableListOf<Pair<String, File>>()
+        val out = mutableListOf<Triple<Int, String, String>>()
         for (i in 0 until list.length()) {
             val row = list.getJSONObject(i)
-            val label = row.optString("label")
-            val file = File(cacheDir, "sub-" + id + "-" + row.optInt("index") + ".vtt")
-            if (!file.exists() || file.length() == 0L) {
-                file.writeBytes(getBytes(APP + row.optString("url")))
-            }
-            if (file.length() > 0) out.add(label to file)
+            out.add(Triple(row.optInt("index"), row.optString("label"), row.optString("url")))
         }
         out
     }.getOrDefault(emptyList())
+
+    private fun subtitleFile(id: String, index: Int): File? = runCatching {
+        val file = File(cacheDir, "sub-" + id + "-" + index + ".vtt")
+        if (!file.exists() || file.length() == 0L) {
+            val row = availableSubs.firstOrNull { it.first == index }
+            val path = row?.third ?: ("/api/subs/" + id + "/" + index + ".vtt")
+            file.writeBytes(getBytes(APP + path))
+        }
+        if (file.length() > 0) file else null
+    }.getOrNull()
 
     private fun get(url: String): String =
         (URL(url).openConnection() as HttpURLConnection).run {
@@ -480,52 +560,87 @@ class PlayerActivity : Activity() {
             TrackKind.SUBTITLE -> setOf(MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_SUBTITLE,
                                         MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT)
         }
-        val textIndices = tracks.indices.filter {
-            tracks[it].trackType in setOf(MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_SUBTITLE,
-                                          MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT)
-        }
-        var choices = tracks.indices.filter { tracks[it].trackType in wanted }
-        if (kind == TrackKind.SUBTITLE) {
-            choices = choices.sortedBy { index ->
-                val language = tracks[index].language ?: ""
-                if (language.startsWith("en")) 0 else 1
-            }
-        }
-        if (choices.isEmpty()) {
-            titleView.text = if (kind == TrackKind.AUDIO) "No other audio tracks" else "No subtitles in this file"
+        val choices = tracks.indices.filter { tracks[it].trackType in wanted }
+        if (kind == TrackKind.AUDIO && choices.isEmpty()) {
+            titleView.text = "No other audio tracks"
             titleView.setTextColor(Color.parseColor(DIM))
             showControls()
             return
         }
+        if (kind == TrackKind.SUBTITLE && availableSubs.isEmpty()) {
+            // The list arrives in the background; if the viewer asks first, fetch it now.
+            availableSubs = fetchSubtitleList(itemId)
+        }
 
+        Log.d(TAG, "tracks: " + kind + " audio=" + choices.size + " subs=" + availableSubs.size)
         picking = kind
+        menuIndex = 0
+        menuActions = mutableListOf()
+        menuRows = mutableListOf()
         trackList.removeAllViews()
         trackList.addView(sheetHeading(if (kind == TrackKind.AUDIO) "Audio" else "Subtitles"))
-        trackList.addView(trackItem("Off", selectedTrack < 0) {
-            runCatching { media.selectTrack(-1) }
-            selectedTrack = -1
-            closeTracks()
-        })
-        choices.forEach { index ->
-            val info = tracks[index]
-            // Files we added come after the embedded tracks, in the order we asked for them.
-            val external = if (info.trackType != MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO) {
-                val position = textIndices.indexOf(index)
-                val embedded = textIndices.size - externalSubs.size
-                if (position >= embedded && position - embedded < externalSubs.size)
-                    externalSubs[position - embedded].first else null
-            } else null
-            val label = external ?: describe(info, index)
-            trackList.addView(trackItem(label, selectedTrack == index) {
-                runCatching { media.selectTrack(index) }
-                selectedTrack = index
-                closeTracks()
-            })
+
+        val rows = mutableListOf<TextView>()
+        val actions = mutableListOf<() -> Unit>()
+        menuRows = rows
+        menuActions = actions
+
+        fun addRow(label: String, selected: Boolean, action: () -> Unit) {
+            val row = menuRow(label, selected)
+            trackList.addView(row)
+            rows.add(row)
+            actions.add(action)
         }
+
+        if (kind == TrackKind.SUBTITLE) {
+            addRow("Off", activeSub < 0) { applySubtitle(-1) }
+            if (availableSubs.isEmpty()) {
+                addRow("No subtitle tracks in this file", false) { closeTracks() }
+            }
+            for ((index, label, _) in availableSubs) {
+                addRow(label, activeSub == index) { applySubtitle(index) }
+            }
+        } else {
+            addRow("Off", selectedTrack < 0) {
+                runCatching { media.selectTrack(-1) }
+                selectedTrack = -1
+                closeTracks()
+            }
+            choices.forEach { index ->
+                addRow(describe(tracks[index], index), selectedTrack == index) {
+                    runCatching { media.selectTrack(index) }
+                    selectedTrack = index
+                    closeTracks()
+                }
+            }
+            menuIndex = if (selectedTrack >= 0) choices.indexOf(selectedTrack) + 1 else 0
+        }
+        menuIndex = menuIndex.coerceIn(0, maxOf(0, menuRows.size - 1))
+        paintMenu()
         trackPanel.visibility = View.VISIBLE
         sheet.visibility = View.GONE
         titleView.visibility = View.GONE
-        trackList.getChildAt(1)?.requestFocus()
+    }
+
+    /** A row that the menu paints, not one the focus system owns. */
+    private fun menuRow(label: String, selected: Boolean): TextView = TextView(this).apply {
+        text = (if (selected) "\u2713  " else "     ") + label
+        setTextColor(Color.parseColor(INK))
+        textSize = 18f
+        setPadding(22, 16, 30, 16)
+        background = pillBackground(false)
+        layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            .apply { bottomMargin = 6 }
+    }
+
+    private fun paintMenu() {
+        menuRows.forEachIndexed { index, row ->
+            val chosen = index == menuIndex
+            row.setBackgroundColor(if (chosen) Color.parseColor("#232b36") else Color.TRANSPARENT)
+            row.setTextColor(Color.parseColor(if (chosen) ACCENT else INK))
+            if (chosen) trackPanel.smoothScrollTo(0, maxOf(0, row.top - dp(120)))
+        }
     }
 
     private fun describe(info: MediaPlayer.TrackInfo, index: Int): String {
@@ -540,24 +655,6 @@ class PlayerActivity : Activity() {
         textSize = 13f
         letterSpacing = 0.14f
         setPadding(18, 10, 18, 12)
-    }
-
-    private fun trackItem(label: String, selected: Boolean, action: () -> Unit): TextView {
-        val view = TextView(this).apply {
-            text = (if (selected) "\u2713  " else "     ") + label
-            setTextColor(Color.parseColor(if (selected) ACCENT else INK))
-            textSize = 18f
-            isFocusable = true
-            isClickable = true
-            setPadding(22, 16, 30, 16)
-            background = pillBackground(false)
-            setOnClickListener { action() }
-            setOnFocusChangeListener { _, focused -> setBackground(pillBackground(focused)) }
-        }
-        view.layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            .apply { bottomMargin = 6 }
-        return view
     }
 
     private fun closeTracks() {
@@ -599,13 +696,28 @@ class PlayerActivity : Activity() {
         if (player?.isPlaying == true) main.postDelayed(hideJob, HIDE_AFTER_MS + 2000)
     }
 
+    // The track menu takes its keys here: once nothing is focusable, onKeyDown stops being
+    // called for the centre button, and a menu that ignores its own button is useless.
+    override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        if (event.action != KeyEvent.ACTION_DOWN) return super.dispatchKeyEvent(event)
+        if (picking == null) return super.dispatchKeyEvent(event)
+        when (event.keyCode) {
+            KeyEvent.KEYCODE_BACK -> closeTracks()
+            KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_UP -> {
+                val step = if (event.keyCode == KeyEvent.KEYCODE_DPAD_DOWN) 1 else -1
+                menuIndex = (menuIndex + step).coerceIn(0, maxOf(0, menuRows.size - 1))
+                paintMenu()
+            }
+            KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                menuActions.getOrNull(menuIndex)?.invoke()
+            }
+            else -> return super.dispatchKeyEvent(event)
+        }
+        return true
+    }
+
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         player ?: return super.onKeyDown(keyCode, event)
-
-        if (picking != null) {
-            if (keyCode == KeyEvent.KEYCODE_BACK) { closeTracks(); return true }
-            return super.onKeyDown(keyCode, event)
-        }
 
         when (keyCode) {
             KeyEvent.KEYCODE_BACK -> {
