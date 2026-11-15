@@ -70,11 +70,12 @@ class MainActivity : Activity() {
 
         /** Playback is native: the page names a stream, the platform decodes it. */
         @JavascriptInterface
-        fun play(url: String, title: String) {
+        fun play(url: String, title: String, who: String, resumeMs: Int) {
             if (!url.startsWith(APP_PREFIX + "api/stream/")) return
             runOnUiThread {
                 startActivity(Intent(this@MainActivity, PlayerActivity::class.java)
-                    .putExtra("url", url).putExtra("title", title))
+                    .putExtra("url", url).putExtra("title", title)
+                    .putExtra("who", who).putExtra("resume", resumeMs))
             }
         }
     }

@@ -1,15 +1,16 @@
 package app.mediatv
 
 import android.app.Activity
-import android.graphics.Color
+import android.content.Context
 import android.graphics.Canvas
+import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.drawable.GradientDrawable
-import android.content.Context
 import android.media.MediaPlayer
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import android.view.Gravity
 import android.view.KeyEvent
 import android.view.SurfaceHolder
@@ -20,6 +21,11 @@ import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import org.json.JSONArray
+import org.json.JSONObject
+import java.io.File
+import java.net.HttpURLConnection
+import java.net.URL
 import java.util.Locale
 
 /**
@@ -27,8 +33,9 @@ import java.util.Locale
  *
  * The WebView cannot demux Matroska, which is most of this library, so the video is played
  * by Android against the stream the NUC proxies. Everything around it is ours: a progress
- * bar, a play/pause, ten-second skips, and the audio and subtitle tracks the file carries.
- * No third-party libraries, same rule as the rest of this app.
+ * bar, play/pause, ten-second skips, the audio and subtitle tracks the file carries, the
+ * subtitle files that live beside it, the position saved back to Jellyfin for whoever is
+ * watching, and the next episode starting by itself.
  */
 class PlayerActivity : Activity() {
 
@@ -39,13 +46,16 @@ class PlayerActivity : Activity() {
         const val PANEL = "#0b0d11"
         const val HIDE_AFTER_MS = 4500L
         const val TICK_MS = 400L
+        const val SAVE_EVERY_MS = 30_000L
         const val SKIP_MS = 10_000
+        const val APP = "http://192.168.1.121:3012"
+        const val TAG = "MediaTV"
     }
 
     private lateinit var surface: SurfaceView
     private lateinit var overlay: FrameLayout
-    private lateinit var sheet: LinearLayout          // the bottom control panel
-    private lateinit var trackList: LinearLayout      // audio / subtitle chooser
+    private lateinit var sheet: LinearLayout
+    private lateinit var trackList: LinearLayout
     private lateinit var bar: ProgressView
     private lateinit var elapsed: TextView
     private lateinit var duration: TextView
@@ -56,10 +66,15 @@ class PlayerActivity : Activity() {
 
     private var player: MediaPlayer? = null
     private var title = ""
+    private var itemId = ""
+    private var who = "together"
     private var durationMs = 0
-    private var selectedTrack = -1
     private var controlsVisible = true
     private var picking: TrackKind? = null
+    private var selectedTrack = -1
+    private var externalSubs: List<Pair<String, File>> = emptyList()
+    private var nextUp: JSONObject? = null
+    private var lastSaved = 0L
     private val main = Handler(Looper.getMainLooper())
 
     private enum class TrackKind { AUDIO, SUBTITLE }
@@ -73,28 +88,38 @@ class PlayerActivity : Activity() {
 
     private val hideJob = Runnable { if (player?.isPlaying == true) hideControls() }
 
+    private val saver = object : Runnable {
+        override fun run() {
+            reportProgress()
+            main.postDelayed(this, SAVE_EVERY_MS)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         val url = intent.getStringExtra("url") ?: run { finish(); return }
         title = intent.getStringExtra("title") ?: ""
+        itemId = url.substringAfterLast('/').substringBefore('?')
+        who = intent.getStringExtra("who") ?: "together"
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         surface = SurfaceView(this)
         root.addView(surface, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-        overlay = FrameLayout(this).apply { setBackgroundColor(Color.parseColor("#00000000")) }
+        overlay = FrameLayout(this).apply { setBackgroundColor(Color.TRANSPARENT) }
         root.addView(overlay, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
         buildOverlay()
         setContentView(root)
 
         surface.holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(holder: SurfaceHolder) = start(url, holder)
+            override fun surfaceCreated(holder: SurfaceHolder) = open(itemId, title, holder)
             override fun surfaceChanged(h: SurfaceHolder, f: Int, w: Int, hh: Int) {}
             override fun surfaceDestroyed(holder: SurfaceHolder) {}
         })
         showControls()
+        main.postDelayed(saver, SAVE_EVERY_MS)
     }
 
     // ------------------------------------------------------------------ the controls
@@ -137,7 +162,6 @@ class PlayerActivity : Activity() {
         }
         timing.addView(elapsed, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        // A bar with real height: at ten feet the default one pixed tall reads as nothing.
         timing.addView(bar, LinearLayout.LayoutParams(0, dp(22), 1f)
             .apply { marginStart = dp(18); marginEnd = dp(18) })
         timing.addView(duration, LinearLayout.LayoutParams(
@@ -177,6 +201,41 @@ class PlayerActivity : Activity() {
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
 
+    private fun timeText(value: String) = TextView(this).apply {
+        text = value
+        setTextColor(Color.parseColor(DIM))
+        textSize = 15f
+        typeface = android.graphics.Typeface.MONOSPACE
+    }
+
+    private fun pill(label: String, action: () -> Unit): TextView {
+        val view = TextView(this).apply {
+            text = label
+            setTextColor(Color.parseColor(INK))
+            textSize = 17f
+            gravity = Gravity.CENTER
+            isFocusable = true
+            isClickable = true
+            setPadding(30, 20, 30, 20)
+            background = pillBackground(false)
+            setOnClickListener { action(); showControls() }
+            setOnFocusChangeListener { _, focused ->
+                setBackground(pillBackground(focused))
+                if (focused) flash()
+            }
+        }
+        view.layoutParams = LinearLayout.LayoutParams(
+            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            .apply { marginEnd = 14 }
+        return view
+    }
+
+    private fun pillBackground(focused: Boolean) = GradientDrawable().apply {
+        setColor(Color.parseColor(if (focused) ACCENT else "#20262f"))
+        cornerRadius = 999f
+        if (!focused) setStroke(2, Color.parseColor("#2a323d"))
+    }
+
     /** A scrub bar drawn by hand: the platform's is too thin to see at ten feet. */
     private inner class ProgressView(context: Context) : View(context) {
         var fraction = 0f
@@ -196,59 +255,47 @@ class PlayerActivity : Activity() {
         }
     }
 
-    private fun timeText(value: String) = TextView(this).apply {
-        text = value
-        setTextColor(Color.parseColor(DIM))
-        textSize = 15f
-        typeface = android.graphics.Typeface.MONOSPACE
+    // ------------------------------------------------------------------ opening a title
+    /**
+     * Load a title: ask the server for its subtitle files and for what follows it, then
+     * hand everything to the platform player. Both answers are cheap and cached, and they
+     * are what let the player show external subtitles and start the next episode itself.
+     */
+    private fun open(id: String, label: String, holder: SurfaceHolder) {
+        itemId = id
+        title = label
+        titleView.text = label
+        Thread {
+            val subs = fetchSubtitles(id)
+            val next = fetchNext(id)
+            runOnUiThread { start(id, subs, next, holder) }
+        }.start()
     }
 
-    /** A control that reads as one thing: rounded, quiet until focused, then accent. */
-    private fun pill(label: String, action: () -> Unit): TextView {
-        val view = TextView(this).apply {
-            text = label
-            setTextColor(Color.parseColor(INK))
-            textSize = 17f
-            gravity = Gravity.CENTER
-            isFocusable = true
-            isClickable = true
-            setPadding(30, 20, 30, 20)
-            background = pillBackground(false)
-            setOnClickListener { action(); showControls() }
-            setOnFocusChangeListener { _, focused ->
-                setBackground(pillBackground(focused))
-                if (focused) flash()
-            }
-        }
-        val params = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            .apply { marginEnd = 14 }
-        view.layoutParams = params
-        return view
-    }
-
-    private fun pillBackground(focused: Boolean) = GradientDrawable().apply {
-        setColor(Color.parseColor(if (focused) ACCENT else "#20262f"))
-        cornerRadius = 999f
-        if (!focused) setStroke(2, Color.parseColor("#2a323d"))
-    }
-
-    // ------------------------------------------------------------------ playback
-    private fun start(url: String, holder: SurfaceHolder) {
+    private fun start(id: String, subs: List<Pair<String, File>>, next: JSONObject?,
+                      holder: SurfaceHolder) {
+        externalSubs = subs
+        nextUp = next
+        releasePlayer()
         val media = MediaPlayer()
         player = media
         try {
-            media.setDataSource(url)
+            for ((_, file) in subs) {
+                runCatching { media.addTimedTextSource(file.absolutePath, MediaPlayer.MEDIA_MIMETYPE_TEXT_VTT) }
+            }
+            media.setDataSource(APP + "/api/stream/" + id)
             media.setSurface(holder.surface)
             media.setOnPreparedListener {
                 durationMs = it.duration
                 duration.text = clock(durationMs)
+                val resume = intent.getIntExtra("resume", 0)
+                if (resume > 5000 && resume < durationMs - 20000) it.seekTo(resume)
                 applyDefaultTracks()
                 it.start()
                 updatePlayButton()
                 showControls()
             }
-            media.setOnCompletionListener { finish() }
+            media.setOnCompletionListener { onFinished() }
             media.setOnErrorListener { _, what, extra ->
                 titleView.text = "This file will not play here ($what/$extra)"
                 titleView.setTextColor(Color.parseColor("#ff9b9b"))
@@ -261,10 +308,18 @@ class PlayerActivity : Activity() {
         }
     }
 
-    /** Prefer an English audio track and no subtitles unless the file forces one on. */
+    private fun releasePlayer() {
+        player?.let {
+            runCatching { it.stop() }
+            runCatching { it.release() }
+        }
+        player = null
+    }
+
+    /** Prefer an English audio track; leave subtitles off unless someone asks for them. */
     private fun applyDefaultTracks() {
         val media = player ?: return
-        val tracks = try { media.trackInfo } catch (e: Exception) { null } ?: return
+        val tracks = runCatching { media.trackInfo }.getOrNull() ?: return
         tracks.forEachIndexed { index, info ->
             if (info.trackType == MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO) {
                 val language = info.language ?: "und"
@@ -277,7 +332,12 @@ class PlayerActivity : Activity() {
 
     private fun togglePlay() {
         val media = player ?: return
-        if (media.isPlaying) media.pause() else media.start()
+        if (media.isPlaying) {
+            media.pause()
+            reportProgress()
+        } else {
+            media.start()
+        }
         updatePlayButton()
     }
 
@@ -289,8 +349,7 @@ class PlayerActivity : Activity() {
     }
 
     private fun updatePlayButton() {
-        val playing = player?.isPlaying == true
-        playButton.text = if (playing) "Pause" else "Play"
+        playButton.text = if (player?.isPlaying == true) "Pause" else "Play"
     }
 
     private fun refreshProgress() {
@@ -306,9 +365,89 @@ class PlayerActivity : Activity() {
 
     private fun clock(ms: Int): String {
         val total = ms / 1000
-        return if (total >= 3600) String.format(Locale.US, "%d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
+        return if (total >= 3600)
+            String.format(Locale.US, "%d:%02d:%02d", total / 3600, (total % 3600) / 60, total % 60)
         else String.format(Locale.US, "%d:%02d", total / 60, total % 60)
     }
+
+    // ------------------------------------------------------------------ what follows
+    private fun onFinished() {
+        reportProgress(played = true)
+        val next = nextUp
+        val id = next?.optString("id") ?: ""
+        if (id.isNotEmpty()) {
+            val label = next.optString("title")
+            main.removeCallbacks(saver)
+            main.post(saver)
+            open(id, label, surface.holder)
+        } else {
+            finish()
+        }
+    }
+
+    // ------------------------------------------------------------------ talking to the server
+    private fun reportProgress(played: Boolean = false) {
+        val media = player ?: return
+        val position = runCatching { media.currentPosition }.getOrDefault(0)
+        if (!played && position < 15_000) return
+        lastSaved = System.currentTimeMillis()
+        val body = JSONObject()
+            .put("item", itemId)
+            .put("ticks", position.toLong() * 10_000L)
+            .put("played", played)
+            .put("who", who)
+            .toString()
+        Thread {
+            runCatching {
+                val connection = URL(APP + "/api/progress").openConnection() as HttpURLConnection
+                connection.requestMethod = "POST"
+                connection.doOutput = true
+                connection.setRequestProperty("Content-Type", "application/json")
+                connection.outputStream.use { it.write(body.toByteArray()) }
+                connection.responseCode
+                connection.disconnect()
+            }.onFailure { Log.w(TAG, "progress post failed: " + it.message) }
+        }.start()
+    }
+
+    private fun fetchNext(id: String): JSONObject? = runCatching {
+        val text = get(APP + "/api/next/" + id)
+        val json = JSONObject(text)
+        if (json.optString("id").isEmpty()) null else json
+    }.getOrNull()
+
+    private fun fetchSubtitles(id: String): List<Pair<String, File>> = runCatching {
+        val list = JSONArray(get(APP + "/api/subs/" + id))
+        val out = mutableListOf<Pair<String, File>>()
+        for (i in 0 until list.length()) {
+            val row = list.getJSONObject(i)
+            val label = row.optString("label")
+            val file = File(cacheDir, "sub-" + id + "-" + row.optInt("index") + ".vtt")
+            if (!file.exists() || file.length() == 0L) {
+                file.writeBytes(getBytes(APP + row.optString("url")))
+            }
+            if (file.length() > 0) out.add(label to file)
+        }
+        out
+    }.getOrDefault(emptyList())
+
+    private fun get(url: String): String =
+        (URL(url).openConnection() as HttpURLConnection).run {
+            connectTimeout = 4000
+            readTimeout = 8000
+            val body = inputStream.bufferedReader().use { it.readText() }
+            disconnect()
+            body
+        }
+
+    private fun getBytes(url: String): ByteArray =
+        (URL(url).openConnection() as HttpURLConnection).run {
+            connectTimeout = 4000
+            readTimeout = 15000
+            val body = inputStream.readBytes()
+            disconnect()
+            body
+        }
 
     // ------------------------------------------------------------------ tracks
     private fun openTracks(kind: TrackKind) {
@@ -319,9 +458,11 @@ class PlayerActivity : Activity() {
             TrackKind.SUBTITLE -> setOf(MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_SUBTITLE,
                                         MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT)
         }
-        val choices = tracks.mapIndexedNotNull { index, info ->
-            if (info.trackType in wanted) index to info else null
+        val textIndices = tracks.indices.filter {
+            tracks[it].trackType in setOf(MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_SUBTITLE,
+                                          MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_TIMEDTEXT)
         }
+        val choices = tracks.indices.filter { tracks[it].trackType in wanted }
         if (choices.isEmpty()) {
             titleView.text = if (kind == TrackKind.AUDIO) "No other audio tracks" else "No subtitles in this file"
             titleView.setTextColor(Color.parseColor(DIM))
@@ -332,13 +473,21 @@ class PlayerActivity : Activity() {
         picking = kind
         trackList.removeAllViews()
         trackList.addView(sheetHeading(if (kind == TrackKind.AUDIO) "Audio" else "Subtitles"))
-        trackList.addView(trackItem("Off", selected = selectedTrack < 0) {
+        trackList.addView(trackItem("Off", selectedTrack < 0) {
             runCatching { media.selectTrack(-1) }
             selectedTrack = -1
             closeTracks()
         })
-        choices.forEach { (index, info) ->
-            val label = describe(info, index)
+        choices.forEach { index ->
+            val info = tracks[index]
+            // Files we added come after the embedded tracks, in the order we asked for them.
+            val external = if (info.trackType != MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO) {
+                val position = textIndices.indexOf(index)
+                val embedded = textIndices.size - externalSubs.size
+                if (position >= embedded && position - embedded < externalSubs.size)
+                    externalSubs[position - embedded].first else null
+            } else null
+            val label = external ?: describe(info, index)
             trackList.addView(trackItem(label, selectedTrack == index) {
                 runCatching { media.selectTrack(index) }
                 selectedTrack = index
@@ -399,6 +548,7 @@ class PlayerActivity : Activity() {
         main.removeCallbacks(hideJob)
         main.removeCallbacks(ticker)
         main.post(ticker)
+        if (currentFocus == null) playButton.requestFocus()
         if (player?.isPlaying == true) main.postDelayed(hideJob, HIDE_AFTER_MS)
     }
 
@@ -416,7 +566,7 @@ class PlayerActivity : Activity() {
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
-        val media = player ?: return super.onKeyDown(keyCode, event)
+        player ?: return super.onKeyDown(keyCode, event)
 
         if (picking != null) {
             if (keyCode == KeyEvent.KEYCODE_BACK) { closeTracks(); return true }
@@ -426,6 +576,7 @@ class PlayerActivity : Activity() {
         when (keyCode) {
             KeyEvent.KEYCODE_BACK -> {
                 if (controlsVisible) { hideControls(); return true }
+                reportProgress()
                 finish()
                 return true
             }
@@ -435,12 +586,10 @@ class PlayerActivity : Activity() {
         }
 
         if (!controlsVisible) {
-            // Any press wakes the controls rather than acting blind.
             when (keyCode) {
                 KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_UP,
                 KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
                     showControls()
-                    if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER && currentFocus == null) playButton.requestFocus()
                     return true
                 }
                 KeyEvent.KEYCODE_DPAD_LEFT -> { skip(-SKIP_MS); showControls(); return true }
@@ -449,7 +598,6 @@ class PlayerActivity : Activity() {
             return super.onKeyDown(keyCode, event)
         }
 
-        // The progress bar is a scrubber: left and right move through the film.
         if (currentFocus === bar) {
             if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) { skip(-SKIP_MS); return true }
             if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) { skip(SKIP_MS); return true }
@@ -460,7 +608,9 @@ class PlayerActivity : Activity() {
             }
         }
         if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
-            hideControls()
+            if (currentFocus === bar) { hideControls(); return true }
+            bar.requestFocus()
+            flash()
             return true
         }
         if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
@@ -479,16 +629,14 @@ class PlayerActivity : Activity() {
     override fun onPause() {
         super.onPause()
         player?.takeIf { it.isPlaying }?.pause()
+        reportProgress()
         updatePlayButton()
     }
 
     override fun onDestroy() {
+        reportProgress()
         main.removeCallbacksAndMessages(null)
-        player?.let {
-            runCatching { it.stop() }
-            runCatching { it.release() }
-        }
-        player = null
+        releasePlayer()
         super.onDestroy()
     }
 }
