@@ -120,10 +120,9 @@ class MainActivity : Activity() {
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode != SPEECH_REQUEST) return
-        if (resultCode != RESULT_OK) {
-            callJs("window.tvNoMic && window.tvNoMic()")
-            return
-        }
+        // A cancelled dialog is the viewer changing their mind: do not fall back to the
+        // keyboard they just declined.
+        if (resultCode != RESULT_OK) return
         val said = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
         if (said.isNullOrBlank()) {
             callJs("window.tvNoMic && window.tvNoMic()")
