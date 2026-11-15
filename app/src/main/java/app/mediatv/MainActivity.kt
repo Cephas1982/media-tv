@@ -28,7 +28,9 @@ class MainActivity : Activity() {
 
     companion object {
         private const val HOME_URL = "http://192.168.1.121:3012/tv"
+        private const val APP_PREFIX = "http://192.168.1.121:3012/"
         private const val SPEECH_REQUEST = 101
+        private const val HOLD_MS = 520L
         private const val TAG = "MediaTV"
     }
 
@@ -38,6 +40,16 @@ class MainActivity : Activity() {
     // before it leaves the page, and that has to be decided synchronously.
     @Volatile
     private var sheetOpen = false
+
+    // The page decides what a press and a hold mean; the shell only tells them apart. Its
+    // own pages get this treatment, Jellyfin's do not.
+    @Volatile
+    private var appPage = false
+    private var held = false
+    private val holdJob = Runnable {
+        held = true
+        callJs("window.tvLongPress && window.tvLongPress()")
+    }
 
     /** What the page is allowed to ask the shell for. */
     inner class Bridge {
@@ -76,6 +88,7 @@ class MainActivity : Activity() {
                 // The page is the thing the remote should drive, so it takes the focus as
                 // soon as it is on screen.
                 override fun onPageFinished(view: WebView, url: String) {
+                    appPage = url.startsWith(APP_PREFIX)
                     view.requestFocus()
                 }
             }
@@ -144,6 +157,24 @@ class MainActivity : Activity() {
     // for an arrow while the page has focus. dispatchKeyEvent comes first, which is the
     // only place this can be intercepted.
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // The centre button is where "press" and "hold" differ, so it is taken here and
+        // handed to the page either as tvLongPress() or as tvSelect().
+        if (event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER && appPage && web.hasFocus()) {
+            if (event.action == KeyEvent.ACTION_DOWN) {
+                if (event.repeatCount == 0) {
+                    held = false
+                    web.postDelayed(holdJob, HOLD_MS)
+                }
+                return true
+            }
+            if (event.action == KeyEvent.ACTION_UP) {
+                web.removeCallbacks(holdJob)
+                if (!held) callJs("window.tvSelect && window.tvSelect()")
+                held = false
+                return true
+            }
+            return true
+        }
         val way = direction(event.keyCode)
         if (way != null && web.hasFocus()) {
             if (event.action == KeyEvent.ACTION_DOWN) {
@@ -170,6 +201,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        web.removeCallbacks(holdJob)
         web.destroy()
         super.onDestroy()
     }
