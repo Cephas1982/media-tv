@@ -67,6 +67,16 @@ class MainActivity : Activity() {
         fun log(message: String) {
             Log.d(TAG, "page: " + message)
         }
+
+        /** Playback is native: the page names a stream, the platform decodes it. */
+        @JavascriptInterface
+        fun play(url: String, title: String) {
+            if (!url.startsWith(APP_PREFIX + "api/stream/")) return
+            runOnUiThread {
+                startActivity(Intent(this@MainActivity, PlayerActivity::class.java)
+                    .putExtra("url", url).putExtra("title", title))
+            }
+        }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
