@@ -83,7 +83,17 @@ class MainActivity : Activity() {
                 mixedContentMode = WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
             }
             webViewClient = object : WebViewClient() {
-                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = false
+                override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                    val url = request.url.toString()
+                    // Jellyfin's client opens in its own window: the player it starts owns
+                    // the page it is in, so Back has to lead out of that window instead.
+                    if (request.isForMainFrame && url.contains(":8096/")) {
+                        startActivity(Intent(this@MainActivity, JellyfinActivity::class.java)
+                            .putExtra("url", url))
+                        return true
+                    }
+                    return false
+                }
 
                 // The page is the thing the remote should drive, so it takes the focus as
                 // soon as it is on screen.
