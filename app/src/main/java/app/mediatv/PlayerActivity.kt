@@ -58,6 +58,7 @@ class PlayerActivity : Activity() {
     private lateinit var sheet: LinearLayout
     private lateinit var trackList: LinearLayout
     private lateinit var trackPanel: ScrollView
+    private val controls = mutableListOf<TextView>()
     private lateinit var bar: ProgressView
     private lateinit var elapsed: TextView
     private lateinit var duration: TextView
@@ -176,14 +177,23 @@ class PlayerActivity : Activity() {
             setPadding(0, 14, 0, 0)
         }
         playButton = pill("Play") { togglePlay() }
+        controls.add(playButton)
         buttons.addView(playButton)
-        buttons.addView(pill("\u00ab 10s") { skip(-SKIP_MS) })
-        buttons.addView(pill("10s \u00bb") { skip(SKIP_MS) })
+        val back = pill("\u00ab 10s") { skip(-SKIP_MS) }
+        controls.add(back)
+        buttons.addView(back)
+        val forward = pill("10s \u00bb") { skip(SKIP_MS) }
+        controls.add(forward)
+        buttons.addView(forward)
         audioButton = pill("Audio") { openTracks(TrackKind.AUDIO) }
+        controls.add(audioButton)
         buttons.addView(audioButton)
         subsButton = pill("Subtitles") { openTracks(TrackKind.SUBTITLE) }
+        controls.add(subsButton)
         buttons.addView(subsButton)
-        buttons.addView(pill("Close") { finish() })
+        val close = pill("Close") { finish() }
+        controls.add(close)
+        buttons.addView(close)
         sheet.addView(buttons)
 
         trackList = LinearLayout(this).apply {
@@ -566,8 +576,14 @@ class PlayerActivity : Activity() {
         main.removeCallbacks(hideJob)
         main.removeCallbacks(ticker)
         main.post(ticker)
-        if (currentFocus == null) playButton.requestFocus()
+        focusControl(controls.indexOfFirst { it === currentFocus })
         if (player?.isPlaying == true) main.postDelayed(hideJob, HIDE_AFTER_MS)
+    }
+
+    /** Put focus on a control by index, or on the first one when the index is not one. */
+    private fun focusControl(index: Int) {
+        val target = controls.getOrNull(index) ?: controls.firstOrNull() ?: return
+        target.requestFocus()
     }
 
     private fun hideControls() {
@@ -620,27 +636,31 @@ class PlayerActivity : Activity() {
         if (currentFocus === bar) {
             if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) { skip(-SKIP_MS); return true }
             if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) { skip(SKIP_MS); return true }
-            if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) {
-                playButton.requestFocus()
-                flash()
-                return true
-            }
+            if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN) { focusControl(0); flash(); return true }
+            if (keyCode == KeyEvent.KEYCODE_DPAD_UP) { hideControls(); return true }
+            return super.onKeyDown(keyCode, event)
+        }
+
+        // The buttons are one row, so left and right step through them by hand.
+        val seat = controls.indexOfFirst { it === currentFocus }
+        if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
+            val step = if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) 1 else -1
+            val next = if (seat < 0) 0 else (seat + step).coerceIn(0, controls.size - 1)
+            focusControl(next)
+            flash()
+            return true
         }
         if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
-            if (currentFocus === bar) { hideControls(); return true }
             bar.requestFocus()
             flash()
             return true
         }
         if (keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER) {
             val focused = currentFocus
-            if (focused == null) { playButton.requestFocus(); flash(); return true }
+            if (focused == null || seat < 0) { focusControl(0); flash(); return true }
             focused.performClick()
             flash()
             return true
-        }
-        if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) {
-            flash()
         }
         return super.onKeyDown(keyCode, event)
     }
