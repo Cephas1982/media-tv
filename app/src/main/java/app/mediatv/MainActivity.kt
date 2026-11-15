@@ -6,66 +6,62 @@ import android.graphics.Color
 import android.os.Bundle
 import android.speech.RecognizerIntent
 import android.util.Log
-import android.view.Gravity
 import android.view.KeyEvent
-import android.view.ViewGroup
 import android.webkit.ConsoleMessage
+import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
 import android.webkit.WebResourceRequest
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
-import android.widget.Button
-import android.widget.LinearLayout
 import org.json.JSONObject
 
 /**
- * The TV shell. It owns three surfaces and nothing else: Jellyfin for watching,
- * Media Desk for asking, and a Recent page for what arrived or is arriving.
+ * The TV shell, reduced to the two things a web page cannot do by itself: forward the
+ * D-pad to the page (a WebView eats arrow keys) and open the system speech recogniser.
  *
- * Deliberately framework-only: no support libraries, no third-party code, so the
- * APK stays a few hundred kilobytes and the app cannot drift out of date on its own.
+ * All of the chrome — the left rail, the ask sheet, the rows — is drawn by the page on the
+ * NUC, so the interface can change without shipping a new APK. This file stays small on
+ * purpose: no support libraries, no third-party code.
  */
 class MainActivity : Activity() {
 
     companion object {
-        // All three are served by the NUC. The TV draws the frame; the logic stays there.
         private const val HOME_URL = "http://192.168.1.121:3012/tv"
-        private const val WATCH_URL = "http://192.168.1.121:8096/web/"
-        private const val ASK_URL = "http://192.168.1.121:3012/"
-        private const val RECENT_URL = "http://192.168.1.121:3012/recent"
         private const val SPEECH_REQUEST = 101
         private const val TAG = "MediaTV"
     }
 
     private lateinit var web: WebView
-    private lateinit var bar: LinearLayout
+
+    // The page tells us when its ask sheet is up, because Back has to close the sheet
+    // before it leaves the page, and that has to be decided synchronously.
+    @Volatile
+    private var sheetOpen = false
+
+    /** What the page is allowed to ask the shell for. */
+    inner class Bridge {
+        @JavascriptInterface
+        fun sheet(open: Boolean) {
+            sheetOpen = open
+        }
+
+        @JavascriptInterface
+        fun listen() {
+            runOnUiThread { startListening() }
+        }
+
+        @JavascriptInterface
+        fun log(message: String) {
+            Log.d(TAG, "page: " + message)
+        }
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.parseColor("#111318"))
-        }
-
-        bar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.START or Gravity.CENTER_VERTICAL
-            setPadding(24, 12, 24, 12)
-        }
-
-        val home = menuButton("TV") { load(HOME_URL) }
-        bar.addView(home)
-        bar.addView(menuButton("Watch") { load(WATCH_URL) })
-        bar.addView(menuButton("Ask") { load(ASK_URL) })
-        bar.addView(menuButton("Talk") { askAndListen() })
-        bar.addView(menuButton("Reload") { web.reload() })
-
-        root.addView(bar, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-
         web = WebView(this).apply {
-            setBackgroundColor(Color.parseColor("#111318"))
+            setBackgroundColor(Color.parseColor("#0b0d11"))
             settings.apply {
                 javaScriptEnabled = true
                 domStorageEnabled = true
@@ -76,115 +72,67 @@ class MainActivity : Activity() {
             }
             webViewClient = object : WebViewClient() {
                 override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean = false
-                // The page is the thing the remote should drive, so it takes the focus
-                // as soon as it is on screen.
+
+                // The page is the thing the remote should drive, so it takes the focus as
+                // soon as it is on screen.
                 override fun onPageFinished(view: WebView, url: String) {
                     view.requestFocus()
                 }
             }
-            // Page console goes to logcat, so a page-side bug is visible with adb logcat.
             webChromeClient = object : WebChromeClient() {
                 override fun onConsoleMessage(msg: ConsoleMessage): Boolean {
                     Log.d(TAG, "console: " + msg.message() + " (line " + msg.lineNumber() + ")")
                     return true
                 }
             }
+            addJavascriptInterface(Bridge(), "MediaTV")
             WebView.setWebContentsDebuggingEnabled(true)
         }
-        root.addView(web, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
 
-        setContentView(root)
-        load(HOME_URL)
+        setContentView(web)
+        web.loadUrl(HOME_URL)
     }
 
-    private fun menuButton(label: String, onClick: () -> Unit): Button =
-        Button(this).apply {
-            text = label
-            isFocusable = true
-            isFocusableInTouchMode = true
-            setOnClickListener { onClick() }
-            setPadding(28, 8, 28, 8)
-            layoutParams = LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.WRAP_CONTENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-            ).apply { marginEnd = 16 }
+    private fun callJs(script: String) {
+        web.evaluateJavascript(script, null)
+    }
+
+    /**
+     * The remote's microphone. An app cannot read the remote mic directly, but the system
+     * recogniser can — the page asks for it and gets the transcript back.
+     */
+    private fun startListening() {
+        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
+            putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+            putExtra(RecognizerIntent.EXTRA_PROMPT, "What should we watch?")
+            putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         }
-
-    private fun load(url: String) {
-        Log.d(TAG, "load " + url)
-        web.loadUrl(url)
-    }
-
-    /**
-     * Media Desk's box is a React-controlled field: assigning .value leaves React's
-     * state stale, so this runs the native value setter and then dispatches input and
-     * change, which is what a real keystroke would produce.
-     */
-    private fun inject(text: String) {
-        val quoted = JSONObject.quote(text)
-        val js = "(function(){" +
-            "var t=" + quoted + ";" +
-            "var e=document.activeElement;" +
-            "if(!e||!(e.tagName==='INPUT'||e.tagName==='TEXTAREA')){e=document.querySelector('textarea, input[type=text], input:not([type])');}" +
-            "if(!e){return 'nofield';}" +
-            "e.focus();" +
-            "var proto=(e.tagName==='TEXTAREA')?HTMLTextAreaElement.prototype:HTMLInputElement.prototype;" +
-            "var setter=Object.getOwnPropertyDescriptor(proto,'value').set;" +
-            "setter.call(e,t);" +
-            "e.dispatchEvent(new Event('input',{bubbles:true}));" +
-            "e.dispatchEvent(new Event('change',{bubbles:true}));" +
-            "return 'ok';})()"
-        web.evaluateJavascript(js) { result -> Log.d(TAG, "inject -> " + result) }
-    }
-
-    /**
-     * The remote's microphone through the system recognizer. Apps cannot capture the
-     * remote mic directly, but they can ask the recognizer that can, and put the
-     * transcript into the focused field.
-     */
-    /**
-     * One press for the whole conversation: bring Media Desk up, wait for it to settle,
-     * then listen with the recognizer. The transcript lands in the box and is sent, so a
-     * viewer says a sentence and reads an answer.
-     */
-    private fun askAndListen() {
-        load(ASK_URL)
-        web.postDelayed({ listen() }, 1600)
-    }
-
-    private fun submit() {
-        web.evaluateJavascript(
-            "(function(){var b=Array.prototype.slice.call(document.querySelectorAll('button'))" +
-            ".filter(function(x){return /send/i.test(x.getAttribute('aria-label')||x.textContent||'');})[0];" +
-            "if(b){b.click();return 'sent';}return 'nosend';})()"
-        ) { result -> Log.d(TAG, "submit -> " + result) }
-    }
-
-    private fun listen() {
-        val intent = Intent(RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
-        intent.putExtra(RecognizerIntent.EXTRA_LANGUAGE_MODEL, RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-        intent.putExtra(RecognizerIntent.EXTRA_PROMPT, "What should we watch?")
-        intent.putExtra(RecognizerIntent.EXTRA_MAX_RESULTS, 1)
         try {
             startActivityForResult(intent, SPEECH_REQUEST)
-        } catch (failure: Exception) {
-            Log.w(TAG, "no speech recognizer: " + failure.message)
+        } catch (missing: Exception) {
+            // A box with no recogniser (an emulator, some builds): say so in the sheet
+            // rather than looking like it is listening and never answering.
+            Log.w(TAG, "no speech recogniser: " + missing.message)
+            callJs("window.tvNoMic && window.tvNoMic()")
         }
     }
 
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode != SPEECH_REQUEST || resultCode != RESULT_OK) return
-        val said = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull() ?: return
+        if (requestCode != SPEECH_REQUEST) return
+        if (resultCode != RESULT_OK) {
+            callJs("window.tvNoMic && window.tvNoMic()")
+            return
+        }
+        val said = data?.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS)?.firstOrNull()
+        if (said.isNullOrBlank()) {
+            callJs("window.tvNoMic && window.tvNoMic()")
+            return
+        }
         Log.d(TAG, "heard: " + said)
-        inject(said)
-        // Give React a moment to take the text before pressing its own Send.
-        web.postDelayed({ submit() }, 400)
+        callJs("window.tvHeard && window.tvHeard(" + JSONObject.quote(said) + ")")
     }
 
-    // A WebView consumes arrow keys for its own scrolling, which on a television means the
-    // page moves instead of the row. While the page has focus the D-pad is therefore
-    // forwarded to the page's own navigation; the toolbar keeps normal focus movement.
     private fun direction(keyCode: Int): String? = when (keyCode) {
         KeyEvent.KEYCODE_DPAD_RIGHT -> "right"
         KeyEvent.KEYCODE_DPAD_LEFT -> "left"
@@ -200,23 +148,22 @@ class MainActivity : Activity() {
         val way = direction(event.keyCode)
         if (way != null && web.hasFocus()) {
             if (event.action == KeyEvent.ACTION_DOWN) {
-                web.evaluateJavascript("window.tvNav && window.tvNav('" + way + "')", null)
+                callJs("window.tvNav && window.tvNav('" + way + "')")
             }
             return true
         }
         return super.dispatchKeyEvent(event)
     }
 
-    // Back walks up rather than out: page history first, then the toolbar (so the tabs are
-    // always reachable once the page owns the D-pad), and only then the app itself.
+    // Back closes the ask sheet, then walks back through the page, and only then leaves.
     override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
         if (keyCode == KeyEvent.KEYCODE_BACK) {
-            if (web.hasFocus() && web.canGoBack()) {
-                web.goBack()
+            if (sheetOpen) {
+                callJs("window.tvCloseAsk && window.tvCloseAsk()")
                 return true
             }
-            if (web.hasFocus()) {
-                bar.getChildAt(0)?.requestFocus()
+            if (web.canGoBack()) {
+                web.goBack()
                 return true
             }
         }
