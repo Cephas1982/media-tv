@@ -150,15 +150,15 @@ class PlayerActivity : Activity() {
             gravity = Gravity.CENTER_VERTICAL
             setPadding(0, 14, 0, 0)
         }
-        playButton = pill("\u25b6  Play") { togglePlay() }
+        playButton = pill("Play") { togglePlay() }
         buttons.addView(playButton)
-        buttons.addView(pill("\u23ea  10s") { skip(-SKIP_MS) })
-        buttons.addView(pill("10s  \u23e9") { skip(SKIP_MS) })
+        buttons.addView(pill("\u00ab 10s") { skip(-SKIP_MS) })
+        buttons.addView(pill("10s \u00bb") { skip(SKIP_MS) })
         audioButton = pill("Audio") { openTracks(TrackKind.AUDIO) }
         buttons.addView(audioButton)
         subsButton = pill("Subtitles") { openTracks(TrackKind.SUBTITLE) }
         buttons.addView(subsButton)
-        buttons.addView(pill("\u2715  Close") { finish() })
+        buttons.addView(pill("Close") { finish() })
         sheet.addView(buttons)
 
         trackList = LinearLayout(this).apply {
@@ -270,7 +270,7 @@ class PlayerActivity : Activity() {
 
     private fun updatePlayButton() {
         val playing = player?.isPlaying == true
-        playButton.text = if (playing) "\u23f8  Pause" else "\u25b6  Play"
+        playButton.text = if (playing) "Pause" else "Play"
     }
 
     private fun refreshProgress() {
