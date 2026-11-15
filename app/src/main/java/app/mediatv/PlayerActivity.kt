@@ -133,14 +133,15 @@ class PlayerActivity : Activity() {
         bar = ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal).apply {
             max = 1000
             progressTintList = android.content.res.ColorStateList.valueOf(Color.parseColor(ACCENT))
-            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#2a313c"))
+            // The unfilled track has to read too: on a dark panel #2a313c is invisible.
+            progressBackgroundTintList = android.content.res.ColorStateList.valueOf(Color.parseColor("#46505f"))
             isFocusable = true
             setOnFocusChangeListener { _, focused -> if (focused) flash() }
         }
         timing.addView(elapsed, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         // A bar with real height: at ten feet the default one pixed tall reads as nothing.
-        timing.addView(bar, LinearLayout.LayoutParams(0, dp(12), 1f)
+        timing.addView(bar, LinearLayout.LayoutParams(0, dp(14), 1f)
             .apply { marginStart = dp(18); marginEnd = dp(18) })
         timing.addView(duration, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
