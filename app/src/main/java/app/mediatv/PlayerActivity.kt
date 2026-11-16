@@ -5,6 +5,9 @@ import android.content.Context
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.RectF
+import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
 import android.media.MediaPlayer
 import android.os.Bundle
@@ -38,6 +41,120 @@ import java.util.Locale
  * subtitle files that live beside it, the position saved back to Jellyfin for whoever is
  * watching, and the next episode starting by itself.
  */
+/**
+ * The control icons, drawn rather than typed. Android renders arrows and circles as
+ * coloured emoji, which is why the first version of these controls looked like clip-art.
+ */
+private enum class Glyph { PLAY, PAUSE, BACK10, FORWARD10, AUDIO, SUBTITLES, NEXT, CLOSE }
+
+private class IconButton(context: Context, private var glyph: Glyph, private val label: String) :
+    View(context) {
+
+    var onPress: (() -> Unit)? = null
+    private val ink = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.parseColor("#f4f6fa")
+        style = Paint.Style.STROKE
+        strokeWidth = context.resources.displayMetrics.density * 2.2f
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+    }
+    private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#f4f6fa") }
+    private var focusedNow = false
+
+    init {
+        isFocusable = true
+        isClickable = true
+        contentDescription = label
+        setOnClickListener { onPress?.invoke() }
+        setOnFocusChangeListener { _, focused ->
+            focusedNow = focused
+            ink.color = Color.parseColor(if (focused) "#0b0d11" else "#f4f6fa")
+            fill.color = Color.parseColor(if (focused) "#0b0d11" else "#f4f6fa")
+            invalidate()
+        }
+    }
+
+    fun setGlyph(next: Glyph) { glyph = next; invalidate() }
+
+    override fun onDraw(canvas: Canvas) {
+        val size = minOf(width, height).toFloat()
+        val cx = width / 2f
+        val cy = height / 2f
+        val r = size * 0.28f
+        if (focusedNow) {
+            val halo = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#6ea8ff") }
+            canvas.drawCircle(cx, cy, size * 0.46f, halo)
+        }
+        when (glyph) {
+            Glyph.PLAY -> {
+                val path = Path()
+                path.moveTo(cx - r * 0.8f, cy - r)
+                path.lineTo(cx + r, cy)
+                path.lineTo(cx - r * 0.8f, cy + r)
+                path.close()
+                canvas.drawPath(path, fill)
+            }
+            Glyph.PAUSE -> {
+                val barW = r * 0.55f
+                canvas.drawRect(cx - r * 0.9f, cy - r, cx - r * 0.9f + barW, cy + r, fill)
+                canvas.drawRect(cx + r * 0.35f, cy - r, cx + r * 0.35f + barW, cy + r, fill)
+            }
+            Glyph.BACK10, Glyph.FORWARD10 -> {
+                val rect = RectF(cx - r, cy - r, cx + r, cy + r)
+                val sweep = if (glyph == Glyph.BACK10) -280f else 280f
+                canvas.drawArc(rect, -90f, sweep, false, ink)
+                // the arrow head at the open end of the circle
+                val head = r * 0.42f
+                val tipX = if (glyph == Glyph.BACK10) cx - r else cx + r
+                val dir = if (glyph == Glyph.BACK10) -1f else 1f
+                canvas.drawLine(tipX, cy, tipX - dir * head, cy - head, ink)
+                canvas.drawLine(tipX, cy, tipX - dir * head, cy + head, ink)
+                val digits = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                    color = ink.color
+                    textSize = size * 0.26f
+                    textAlign = Paint.Align.CENTER
+                    typeface = Typeface.DEFAULT_BOLD
+                }
+                canvas.drawText("10", cx, cy + digits.textSize * 0.36f, digits)
+            }
+            Glyph.AUDIO -> {
+                val path = Path()
+                path.moveTo(cx - r * 0.9f, cy - r * 0.35f)
+                path.lineTo(cx - r * 0.45f, cy - r * 0.35f)
+                path.lineTo(cx, cy - r)
+                path.lineTo(cx, cy + r)
+                path.lineTo(cx - r * 0.45f, cy + r * 0.35f)
+                path.lineTo(cx - r * 0.9f, cy + r * 0.35f)
+                path.close()
+                canvas.drawPath(path, fill)
+                canvas.drawArc(RectF(cx - r * 0.1f, cy - r * 0.7f, cx + r * 0.9f, cy + r * 0.7f),
+                               -50f, 100f, false, ink)
+                canvas.drawArc(RectF(cx - r * 0.1f, cy - r * 1.05f, cx + r * 1.35f, cy + r * 1.05f),
+                               -50f, 100f, false, ink)
+            }
+            Glyph.SUBTITLES -> {
+                val box = RectF(cx - r * 1.15f, cy - r * 0.75f, cx + r * 1.15f, cy + r * 0.75f)
+                canvas.drawRoundRect(box, r * 0.25f, r * 0.25f, ink)
+                canvas.drawLine(box.left + r * 0.3f, cy + r * 0.28f, box.left + r * 0.75f, cy + r * 0.28f, ink)
+                canvas.drawLine(box.right - r * 0.75f, cy + r * 0.28f, box.right - r * 0.3f, cy + r * 0.28f, ink)
+            }
+            Glyph.NEXT -> {
+                val path = Path()
+                path.moveTo(cx - r, cy - r)
+                path.lineTo(cx + r * 0.45f, cy)
+                path.lineTo(cx - r, cy + r)
+                path.close()
+                canvas.drawPath(path, fill)
+                canvas.drawRect(cx + r * 0.62f, cy - r, cx + r * 0.62f + r * 0.3f, cy + r, fill)
+            }
+            Glyph.CLOSE -> {
+                canvas.drawLine(cx - r * 0.7f, cy - r * 0.7f, cx + r * 0.7f, cy + r * 0.7f, ink)
+                canvas.drawLine(cx + r * 0.7f, cy - r * 0.7f, cx - r * 0.7f, cy + r * 0.7f, ink)
+            }
+        }
+    }
+}
+
 class PlayerActivity : Activity() {
 
     private companion object {
@@ -59,15 +176,16 @@ class PlayerActivity : Activity() {
     private lateinit var sheet: LinearLayout
     private lateinit var trackList: LinearLayout
     private lateinit var trackPanel: ScrollView
-    private val controls = mutableListOf<TextView>()
+    private val controls = mutableListOf<View>()
     private lateinit var bar: ProgressView
     private lateinit var elapsed: TextView
     private lateinit var duration: TextView
     private lateinit var titleView: TextView
     private lateinit var subtitleView: TextView
-    private lateinit var playButton: TextView
-    private lateinit var audioButton: TextView
-    private lateinit var subsButton: TextView
+    private lateinit var playButton: IconButton
+    private lateinit var audioButton: IconButton
+    private lateinit var subsButton: IconButton
+    private lateinit var sheetTag: TextView
 
     private var player: MediaPlayer? = null
     private var title = ""
@@ -148,9 +266,11 @@ class PlayerActivity : Activity() {
             setLineSpacing(4f, 1f)
             maxWidth = resources.displayMetrics.widthPixels * 3 / 4
         }
+        // Subtitles belong to the picture, not to the controls: the overlay comes and goes,
+        // the words do not.
         root.addView(subtitleView, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
-            Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(120) })
+            Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply { bottomMargin = dp(150) })
 
         titleView = TextView(this).apply {
             text = title
@@ -158,31 +278,33 @@ class PlayerActivity : Activity() {
             textSize = 20f
             setShadowLayer(8f, 0f, 2f, Color.BLACK)
             setPadding(48, 34, 48, 34)
+            visibility = View.GONE        // the control row names it instead
         }
         overlay.addView(titleView, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             Gravity.TOP or Gravity.START))
 
+        // No panel: the controls sit on the picture under a soft gradient, the way every
+        // streaming app does it. A rounded box in the middle of the screen reads as a dialog.
         sheet = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(48, 22, 48, 30)
-            background = GradientDrawable().apply {
-                setColor(Color.parseColor(PANEL))
-                cornerRadius = 26f
-                setStroke(2, Color.parseColor("#232c37"))
+            setPadding(dp(48), dp(26), dp(48), dp(30))
+            background = GradientDrawable(GradientDrawable.Orientation.BOTTOM_TOP,
+                intArrayOf(0xF20B0D11.toInt(), 0xCC0B0D11.toInt(), 0x000B0D11)).apply {
+                cornerRadius = 0f
             }
         }
         val params = FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT,
             Gravity.BOTTOM or Gravity.FILL_HORIZONTAL)
-        params.setMargins(40, 0, 40, 36)
         overlay.addView(sheet, params)
 
         val timing = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, 0, 0, dp(6))
         }
-        elapsed = timeText("0:00")
+        elapsed = timeText("0:00").apply { visibility = View.GONE }
         duration = timeText("0:00")
         bar = ProgressView(this).apply {
             isFocusable = true
@@ -190,8 +312,8 @@ class PlayerActivity : Activity() {
         }
         timing.addView(elapsed, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
-        timing.addView(bar, LinearLayout.LayoutParams(0, dp(22), 1f)
-            .apply { marginStart = dp(18); marginEnd = dp(18) })
+        timing.addView(bar, LinearLayout.LayoutParams(0, dp(26), 1f)
+            .apply { marginStart = dp(10); marginEnd = dp(10) })
         timing.addView(duration, LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         sheet.addView(timing)
@@ -199,34 +321,43 @@ class PlayerActivity : Activity() {
         val buttons = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
-            setPadding(0, 14, 0, 0)
         }
-        playButton = pill("Play") { togglePlay() }
-        controls.add(playButton)
-        buttons.addView(playButton)
-        val back = pill("\u00ab 10s") { skip(-SKIP_MS) }
-        controls.add(back)
-        buttons.addView(back)
-        val forward = pill("10s \u00bb") { skip(SKIP_MS) }
-        controls.add(forward)
-        buttons.addView(forward)
-        audioButton = pill("Audio") { openTracks(TrackKind.AUDIO) }
-        controls.add(audioButton)
-        buttons.addView(audioButton)
-        subsButton = pill("Subtitles") { openTracks(TrackKind.SUBTITLE) }
-        controls.add(subsButton)
-        buttons.addView(subsButton)
-        val close = pill("Close") { finish() }
-        controls.add(close)
-        buttons.addView(close)
+
+        fun button(glyph: Glyph, name: String, press: () -> Unit): IconButton {
+            val view = IconButton(this, glyph, name)
+            view.onPress = { press(); showControls() }
+            view.layoutParams = LinearLayout.LayoutParams(dp(64), dp(64))
+                .apply { marginEnd = dp(14) }
+            controls.add(view)
+            buttons.addView(view)
+            return view
+        }
+
+        playButton = button(Glyph.PLAY, "Play or pause") { togglePlay() }
+        button(Glyph.BACK10, "Back ten seconds") { skip(-SKIP_MS) }
+        button(Glyph.FORWARD10, "Forward ten seconds") { skip(SKIP_MS) }
+        audioButton = button(Glyph.AUDIO, "Audio track") { openTracks(TrackKind.AUDIO) }
+
+        // What is playing, in the middle of the row, so the icons never shift.
+        sheetTag = TextView(this).apply {
+            text = title
+            setTextColor(Color.parseColor(INK))
+            textSize = 17f
+            maxLines = 2
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            setPadding(dp(10), 0, dp(10), 0)
+        }
+        buttons.addView(sheetTag, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+
+        button(Glyph.NEXT, "Next episode") { advance() }
+        subsButton = button(Glyph.SUBTITLES, "Subtitles") { openTracks(TrackKind.SUBTITLE) }
+        button(Glyph.CLOSE, "Close") { finish() }
         sheet.addView(buttons)
 
         trackList = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(16, 16, 16, 16)
         }
-        // A film can carry forty subtitle tracks; the panel scrolls rather than running
-        // off the screen.
         trackPanel = ScrollView(this).apply {
             visibility = View.GONE
             background = GradientDrawable().apply {
@@ -250,50 +381,22 @@ class PlayerActivity : Activity() {
         typeface = android.graphics.Typeface.MONOSPACE
     }
 
-    private fun pill(label: String, action: () -> Unit): TextView {
-        val view = TextView(this).apply {
-            text = label
-            setTextColor(Color.parseColor(INK))
-            textSize = 17f
-            gravity = Gravity.CENTER
-            isFocusable = true
-            isClickable = true
-            setPadding(30, 20, 30, 20)
-            background = pillBackground(false)
-            setOnClickListener { action(); showControls() }
-            setOnFocusChangeListener { _, focused ->
-                setBackground(pillBackground(focused))
-                if (focused) flash()
-            }
-        }
-        view.layoutParams = LinearLayout.LayoutParams(
-            ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-            .apply { marginEnd = 14 }
-        return view
-    }
-
-    private fun pillBackground(focused: Boolean) = GradientDrawable().apply {
-        setColor(Color.parseColor(if (focused) ACCENT else "#20262f"))
-        cornerRadius = 999f
-        if (!focused) setStroke(2, Color.parseColor("#2a323d"))
-    }
-
-    /** A scrub bar drawn by hand: the platform's is too thin to see at ten feet. */
+    /** A scrub bar drawn by hand: a thin line with the playhead on it. */
     private inner class ProgressView(context: Context) : View(context) {
         var fraction = 0f
-        private val track = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#5b6678") }
-        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor(ACCENT) }
+        private val track = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#8A93A0") }
+        private val fill = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor("#f4f6fa") }
+        private val dot = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.parseColor(ACCENT) }
 
         override fun onDraw(canvas: Canvas) {
-            val height = dp(9).toFloat()
+            val line = dp(3).toFloat()
             val middle = this.height / 2f
-            val radius = height / 2f
-            canvas.drawRoundRect(0f, middle - radius, this.width.toFloat(), middle + radius,
-                                 radius, radius, track)
-            if (fraction > 0f) {
-                canvas.drawRoundRect(0f, middle - radius, this.width * fraction, middle + radius,
-                                     radius, radius, fill)
-            }
+            val played = (this.width * fraction).coerceIn(0f, this.width.toFloat())
+            canvas.drawRoundRect(0f, middle - line / 2, this.width.toFloat(), middle + line / 2,
+                                 line / 2, line / 2, track)
+            canvas.drawRoundRect(0f, middle - line / 2, played, middle + line / 2,
+                                 line / 2, line / 2, fill)
+            canvas.drawCircle(played, middle, dp(7).toFloat(), dot)
         }
     }
 
@@ -345,6 +448,7 @@ class PlayerActivity : Activity() {
             }
             media.setOnCompletionListener { onFinished() }
             media.setOnErrorListener { _, what, extra ->
+                titleView.visibility = View.VISIBLE
                 titleView.text = "This file will not play here ($what/$extra)"
                 titleView.setTextColor(Color.parseColor("#ff9b9b"))
                 true
@@ -397,7 +501,7 @@ class PlayerActivity : Activity() {
     }
 
     private fun updatePlayButton() {
-        playButton.text = if (player?.isPlaying == true) "Pause" else "Play"
+        playButton.setGlyph(if (player?.isPlaying == true) Glyph.PAUSE else Glyph.PLAY)
     }
 
     private fun refreshProgress() {
@@ -408,6 +512,7 @@ class PlayerActivity : Activity() {
             bar.invalidate()
         }
         elapsed.text = clock(position)
+        elapsed.visibility = if (currentFocus === bar) View.VISIBLE else View.GONE
         updatePlayButton()
         if (cues.isNotEmpty()) {
             val cue = cues.firstOrNull { position >= it.start && position <= it.end }
@@ -635,7 +740,10 @@ class PlayerActivity : Activity() {
         setTextColor(Color.parseColor(INK))
         textSize = 18f
         setPadding(22, 16, 30, 16)
-        background = pillBackground(false)
+        background = GradientDrawable().apply {
+            setColor(Color.TRANSPARENT)
+            cornerRadius = 12f
+        }
         layoutParams = LinearLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
             .apply { bottomMargin = 6 }
@@ -741,8 +849,14 @@ class PlayerActivity : Activity() {
 
         if (!controlsVisible) {
             when (keyCode) {
-                KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_UP,
                 KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER -> {
+                    // One press in the middle of the film pauses it, and the controls come
+                    // up so the next press has somewhere to go.
+                    togglePlay()
+                    showControls()
+                    return true
+                }
+                KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_UP -> {
                     showControls()
                     return true
                 }
