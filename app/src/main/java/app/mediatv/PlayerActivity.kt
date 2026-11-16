@@ -9,6 +9,8 @@ import android.graphics.Path
 import android.graphics.RectF
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
+import android.media.MediaCodecList
+import android.media.MediaFormat
 import android.media.MediaPlayer
 import android.os.Bundle
 import android.os.Handler
@@ -194,7 +196,10 @@ class PlayerActivity : Activity() {
     private var durationMs = 0
     private var controlsVisible = true
     private var picking: TrackKind? = null
-    private var selectedTrack = -1
+    private var selectedTrack = -1          // audio track chosen by the viewer, -1 = the file's
+    private var audioTracks: List<Int> = emptyList()
+    private var defaultAudio = -1           // the track that plays when nobody chooses one
+    private var audioMuted = false
     private var availableSubs: List<Triple<Int, String, String>> = emptyList()
     private var activeSub = -1              // stream index chosen by the viewer, -1 for none
     private var resumeAt = 0                // where to start, for a restart after a change
@@ -210,6 +215,14 @@ class PlayerActivity : Activity() {
     private val main = Handler(Looper.getMainLooper())
 
     private enum class TrackKind { AUDIO, SUBTITLE }
+
+    /** The audio track that is playing: the viewer's choice, else the file's own default. */
+    private val activeAudio: Int
+        get() = when {
+            audioMuted -> -1
+            selectedTrack >= 0 -> selectedTrack
+            else -> defaultAudio
+        }
 
     private val ticker = object : Runnable {
         override fun run() {
@@ -457,15 +470,12 @@ class PlayerActivity : Activity() {
             }
             media.setOnCompletionListener { onFinished() }
             media.setOnErrorListener { _, what, extra ->
-                titleView.visibility = View.VISIBLE
-                titleView.text = "This file will not play here ($what/$extra)"
-                titleView.setTextColor(Color.parseColor("#ff9b9b"))
+                say("This file will not play here ($what/$extra)", "#ff9b9b")
                 true
             }
             media.prepareAsync()
         } catch (failure: Exception) {
-            titleView.text = "Could not open this title: " + failure.message
-            titleView.setTextColor(Color.parseColor("#ff9b9b"))
+            say("Could not open this title: " + failure.message, "#ff9b9b")
         }
     }
 
@@ -477,18 +487,92 @@ class PlayerActivity : Activity() {
         player = null
     }
 
-    /** Prefer an English audio track; leave subtitles off unless someone asks for them. */
+    /**
+     * Play the audio track the file itself defaults to.
+     *
+     * The old rule was "prefer an English track", which — because the default usually is
+     * English — selected the first English track that was NOT index 0: a commentary, or a
+     * codec this box has no decoder for, which is how a show played with no sound at all.
+     * Selecting nothing is the container's own default, which is what every other player
+     * plays, so that is the default here too. The one reason to pick a track is a default
+     * this device cannot decode: then the first track it can decode is taken instead.
+     * Either way the choice is logged, because silence has to be diagnosable from logcat.
+     */
     private fun applyDefaultTracks() {
         val media = player ?: return
         val tracks = runCatching { media.trackInfo }.getOrNull() ?: return
-        tracks.forEachIndexed { index, info ->
-            if (info.trackType == MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO) {
-                val language = info.language ?: "und"
-                if (language.startsWith("en") && index != 0) {
-                    if (runCatching { media.selectTrack(index) }.isSuccess) selectedTrack = index
-                }
+        audioTracks = tracks.indices.filter {
+            tracks[it].trackType == MediaPlayer.TrackInfo.MEDIA_TRACK_TYPE_AUDIO
+        }
+        selectedTrack = -1
+        audioMuted = false
+        defaultAudio = audioTracks.firstOrNull() ?: -1
+
+        val mime = tracks.getOrNull(defaultAudio)?.let { mimeOf(it) }
+        if (mime != null && !decodable(mime)) {
+            val rescue = audioTracks.drop(1).firstOrNull { other ->
+                mimeOf(tracks[other])?.let { decodable(it) } == true
+            }
+            if (rescue != null && runCatching { media.selectTrack(rescue) }.isSuccess) {
+                selectedTrack = rescue
+                Log.w(TAG, "audio: default track " + defaultAudio + " is " + mime +
+                    ", which this box cannot decode; playing track " + rescue)
+            } else {
+                Log.w(TAG, "audio: default track " + defaultAudio + " is " + mime +
+                    ", which this box cannot decode, and no other audio track can either")
             }
         }
+        reportAudio(tracks)
+    }
+
+    /**
+     * Say something over the picture. The title line is hidden while playback is fine (the
+     * control row names the episode), so anything that tells the viewer what just happened
+     * has to bring it back: a line written into a hidden view is a button that does nothing.
+     */
+    private fun say(message: String, colour: String = DIM) {
+        titleView.text = message
+        titleView.setTextColor(Color.parseColor(colour))
+        titleView.visibility = View.VISIBLE
+    }
+
+    private fun reportAudio(tracks: Array<MediaPlayer.TrackInfo>) {
+        if (audioTracks.isEmpty()) {
+            // Nothing to choose from is worth saying out loud: on some files the platform
+            // reports the picture and no sound at all, and a log that names the tracks it
+            // got is the difference between "the app picked wrong" and "there was nothing
+            // to pick".
+            Log.w(TAG, "audio: the platform reports no audio track for this file (" +
+                tracks.size + " track(s): " + tracks.withIndex().joinToString(", ") { (index, info) ->
+                    index.toString() + "=type" + info.trackType + "/" + (mimeOf(info) ?: "?")
+                } + ")")
+            return
+        }
+        val playing = tracks.getOrNull(activeAudio)
+        Log.d(TAG, "audio: playing track " + activeAudio +
+            " language=" + (playing?.language ?: "?") +
+            " mime=" + (playing?.let { mimeOf(it) } ?: "?") +
+            " of " + audioTracks.size + " [" + audioTracks.joinToString(", ") { index ->
+                index.toString() + ":" + (tracks[index].language ?: "?") + "/" +
+                    (mimeOf(tracks[index]) ?: "?") + (if (index == activeAudio) "*" else "")
+            } + "]")
+    }
+
+    private fun mimeOf(info: MediaPlayer.TrackInfo): String? =
+        runCatching { info.format?.getString(MediaFormat.KEY_MIME) }.getOrNull()
+
+    /**
+     * Whether this device has a decoder for a MIME type. The platform player does not
+     * transcode — a server might, ours does not — so a track whose codec is not on the box
+     * plays as silence with the picture running perfectly.
+     */
+    private fun decodable(mime: String): Boolean = try {
+        MediaCodecList(MediaCodecList.REGULAR_CODECS)
+            .findDecoderForFormat(MediaFormat().apply { setString(MediaFormat.KEY_MIME, mime) }) != null
+    } catch (unsure: Exception) {
+        // A throw here means the format was too thin for the codec list to answer, not that
+        // nothing can play it: assume the default track is fine rather than change it.
+        true
     }
 
     private fun togglePlay() {
@@ -683,8 +767,7 @@ class PlayerActivity : Activity() {
         }
         val choices = tracks.indices.filter { tracks[it].trackType in wanted }
         if (kind == TrackKind.AUDIO && choices.isEmpty()) {
-            titleView.text = "No other audio tracks"
-            titleView.setTextColor(Color.parseColor(DIM))
+            say("No audio track this box can use")
             showControls()
             return
         }
@@ -724,19 +807,28 @@ class PlayerActivity : Activity() {
                 addRow(label, activeSub == index) { applySubtitle(index) }
             }
         } else {
-            addRow("Off", selectedTrack < 0) {
+            addRow("Off \u00b7 no sound", audioMuted) {
                 runCatching { media.selectTrack(-1) }
-                selectedTrack = -1
+                audioMuted = true
                 closeTracks()
+                Log.d(TAG, "audio: the viewer turned the sound off")
             }
             choices.forEach { index ->
-                addRow(describe(tracks[index], index), selectedTrack == index) {
-                    runCatching { media.selectTrack(index) }
-                    selectedTrack = index
+                // The language alone is not enough to tell two English tracks apart: one is
+                // the film, the other is a commentator, and the codec is what decides
+                // whether the box can play it at all — so both are on the row.
+                addRow(describe(tracks[index], index), !audioMuted && activeAudio == index) {
+                    if (runCatching { media.selectTrack(index) }.isSuccess) {
+                        selectedTrack = index
+                        audioMuted = false
+                        Log.d(TAG, "audio: the viewer chose track " + index +
+                            " language=" + (tracks[index].language ?: "?") +
+                            " mime=" + (mimeOf(tracks[index]) ?: "?"))
+                    }
                     closeTracks()
                 }
             }
-            menuIndex = if (selectedTrack >= 0) choices.indexOf(selectedTrack) + 1 else 0
+            menuIndex = choices.indexOf(activeAudio) + if (activeAudio >= 0) 1 else 0
         }
         menuIndex = menuIndex.coerceIn(0, maxOf(0, menuRows.size - 1))
         paintMenu()
@@ -774,9 +866,57 @@ class PlayerActivity : Activity() {
     }
 
     private fun describe(info: MediaPlayer.TrackInfo, index: Int): String {
-        val language = info.language?.takeIf { it.isNotBlank() && it != "und" } ?: "Track ${index + 1}"
-        val codec = runCatching { info.format?.getString("mime") }.getOrNull()
-        return if (codec != null) "$language  \u00b7  " + codec.substringAfter('/') else language
+        val language = languageName(info.language).ifBlank { "Track " + (index + 1) }
+        val mime = mimeOf(info)
+        val codec = codecName(mime)
+        var label = if (codec.isBlank()) language else language + "  \u00b7  " + codec
+        if (mime != null && !decodable(mime)) label += "  \u00b7  this box cannot play it"
+        return label
+    }
+
+    /** "eng" is the language code a file carries; "English" is what a person reads. */
+    private fun languageName(code: String?): String {
+        val key = (code ?: "").trim().lowercase(Locale.ROOT)
+        return when (key) {
+            "", "und", "unknown", "mul", "zxx" -> ""
+            "en", "eng" -> "English"
+            "es", "spa" -> "Spanish"
+            "fr", "fra", "fre" -> "French"
+            "de", "deu", "ger" -> "German"
+            "it", "ita" -> "Italian"
+            "pt", "por" -> "Portuguese"
+            "ja", "jpn" -> "Japanese"
+            "ko", "kor" -> "Korean"
+            "zh", "zho", "chi" -> "Chinese"
+            "ru", "rus" -> "Russian"
+            "hi", "hin" -> "Hindi"
+            "ar", "ara" -> "Arabic"
+            "nl", "nld", "dut" -> "Dutch"
+            "sv", "swe" -> "Swedish"
+            "no", "nor" -> "Norwegian"
+            "da", "dan" -> "Danish"
+            "pl", "pol" -> "Polish"
+            else -> key.uppercase(Locale.ROOT)
+        }
+    }
+
+    /** The MIME subtype is what the decoder list speaks; a person reads AC3, not "ac3". */
+    private fun codecName(mime: String?): String {
+        val tail = (mime ?: "").substringAfter('/').lowercase(Locale.ROOT)
+        return when (tail) {
+            "", "raw" -> ""
+            "ac3", "ac-3" -> "AC3"
+            "eac3", "ec-3", "e-ac-3" -> "E-AC3"
+            "truehd" -> "TrueHD"
+            "dts", "dts-hd", "dtshd" -> "DTS"
+            "mp4a-latm", "mp4a", "aac", "aac-latm" -> "AAC"
+            "opus" -> "Opus"
+            "vorbis" -> "Vorbis"
+            "flac" -> "FLAC"
+            "alac" -> "ALAC"
+            "pcm", "pcm-s16le", "lpcm" -> "PCM"
+            else -> tail.uppercase(Locale.ROOT)
+        }
     }
 
     private fun sheetHeading(text: String) = TextView(this).apply {

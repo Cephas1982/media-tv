@@ -8,9 +8,19 @@
     <uses-feature android:name="android.software.leanback" android:required="false" />
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
+    <!-- The shell names the service that will answer the microphone, which a package-scoped
+         app can only see if it says so here. Without this the log line says "none" on a box
+         that does have a recogniser. -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.action.RECOGNIZE_SPEECH" />
+        </intent>
+    </queries>
+
     <application
         android:allowBackup="true"
         android:banner="@drawable/banner"
+        android:enableOnBackInvokedCallback="false"
         android:icon="@drawable/banner"
         android:label="@string/app_name"
         android:usesCleartextTraffic="true"
