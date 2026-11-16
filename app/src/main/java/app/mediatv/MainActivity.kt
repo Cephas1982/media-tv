@@ -111,6 +111,11 @@ class MainActivity : Activity() {
                 override fun onPageFinished(view: WebView, url: String) {
                     appPage = url.startsWith(APP_PREFIX)
                     view.requestFocus()
+                    // The WebView focuses its first focusable element as it settles, which on
+                    // this page is the rail; ask the page to put focus where it belongs.
+                    view.postDelayed({
+                        if (appPage) callJs("window.tvClaim && window.tvClaim()")
+                    }, 250)
                 }
             }
             webChromeClient = object : WebChromeClient() {

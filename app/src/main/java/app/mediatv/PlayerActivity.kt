@@ -330,9 +330,16 @@ class PlayerActivity : Activity() {
             media.setOnPreparedListener {
                 durationMs = it.duration
                 duration.text = clock(durationMs)
-                if (resumeAt > 5000 && resumeAt < durationMs - 20000) it.seekTo(resumeAt)
                 applyDefaultTracks()
                 it.start()
+                // Seek AFTER start: a seek issued before playback begins is dropped on
+                // some devices, which is why a resume quietly restarted the film.
+                if (resumeAt > 5000 && resumeAt < durationMs - 20000) {
+                    val target = resumeAt
+                    Log.d(TAG, "resume to " + target + "ms")
+                    it.seekTo(target.toLong(), MediaPlayer.SEEK_CLOSEST_SYNC)
+                    main.postDelayed({ runCatching { it.seekTo(target.toLong(), MediaPlayer.SEEK_CLOSEST_SYNC) } }, 400)
+                }
                 updatePlayButton()
                 showControls()
             }
