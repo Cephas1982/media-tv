@@ -111,6 +111,8 @@ class MainActivity : Activity() {
                 override fun onPageFinished(view: WebView, url: String) {
                     appPage = url.startsWith(APP_PREFIX)
                     view.requestFocus()
+                    view.postDelayed({ view.requestFocus() }, 200)
+                    android.webkit.CookieManager.getInstance().flush()
                     // The WebView focuses its first focusable element as it settles, which on
                     // this page is the rail; ask the page to put focus where it belongs.
                     view.postDelayed({
@@ -126,6 +128,9 @@ class MainActivity : Activity() {
             }
             addJavascriptInterface(Bridge(), "MediaTV")
             WebView.setWebContentsDebuggingEnabled(true)
+            // The chosen profile lives in a cookie; a WebView only writes its cookie store
+            // to disk when asked, so a killed app forgot who was watching.
+            android.webkit.CookieManager.getInstance().setAcceptCookie(true)
         }
 
         setContentView(web)
@@ -185,7 +190,7 @@ class MainActivity : Activity() {
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
         // The centre button is where "press" and "hold" differ, so it is taken here and
         // handed to the page either as tvLongPress() or as tvSelect().
-        if (event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER && appPage && web.hasFocus()) {
+        if (event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER && appPage) {
             if (event.action == KeyEvent.ACTION_DOWN) {
                 if (event.repeatCount == 0) {
                     held = false
@@ -202,7 +207,9 @@ class MainActivity : Activity() {
             return true
         }
         val way = direction(event.keyCode)
-        if (way != null && web.hasFocus()) {
+        // Our own page owns the D-pad outright: requiring the WebView to hold focus meant
+        // a press just after load went to the rail instead of the focused card.
+        if (way != null && appPage) {
             if (event.action == KeyEvent.ACTION_DOWN) {
                 callJs("window.tvNav && window.tvNav('" + way + "')")
             }
@@ -224,6 +231,13 @@ class MainActivity : Activity() {
             }
         }
         return super.onKeyDown(keyCode, event)
+    }
+
+    // Anything that takes focus away from the page (the IME, a system dialog) gives it back
+    // when the window is ours again.
+    override fun onWindowFocusChanged(hasFocus: Boolean) {
+        super.onWindowFocusChanged(hasFocus)
+        if (hasFocus && appPage) web.requestFocus()
     }
 
     override fun onDestroy() {

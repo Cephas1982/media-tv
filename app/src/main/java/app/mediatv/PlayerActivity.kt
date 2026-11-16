@@ -358,7 +358,7 @@ class PlayerActivity : Activity() {
             orientation = LinearLayout.VERTICAL
             setPadding(16, 16, 16, 16)
         }
-        trackPanel = ScrollView(this).apply {
+        trackPanel = LimitedScroll(this, minOf(dp(760), resources.displayMetrics.heightPixels - dp(80))).apply {
             visibility = View.GONE
             background = GradientDrawable().apply {
                 setColor(Color.parseColor("#171b22"))
@@ -368,8 +368,17 @@ class PlayerActivity : Activity() {
             isFocusable = false
             addView(trackList)
         }
+        val screen = resources.displayMetrics
         overlay.addView(trackPanel, FrameLayout.LayoutParams(
-            dp(620), dp(760), Gravity.CENTER).apply { setMargins(40, 40, 40, 40) })
+            minOf(dp(620), (screen.widthPixels * 0.62f).toInt()),
+            ViewGroup.LayoutParams.WRAP_CONTENT,
+            Gravity.CENTER).apply { setMargins(dp(24), dp(24), dp(24), dp(24)) })
+    }
+
+    private class LimitedScroll(context: Context, private val maxHeight: Int) : ScrollView(context) {
+        override fun onMeasure(widthSpec: Int, heightSpec: Int) {
+            super.onMeasure(widthSpec, MeasureSpec.makeMeasureSpec(maxHeight, MeasureSpec.AT_MOST))
+        }
     }
 
     private fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
@@ -690,7 +699,9 @@ class PlayerActivity : Activity() {
         menuActions = mutableListOf()
         menuRows = mutableListOf()
         trackList.removeAllViews()
-        trackList.addView(sheetHeading(if (kind == TrackKind.AUDIO) "Audio" else "Subtitles"))
+        trackList.addView(sheetHeading(
+            if (kind == TrackKind.AUDIO) "Audio"
+            else "Subtitles \u00b7 " + availableSubs.size + " tracks \u00b7 back to close"))
 
         val rows = mutableListOf<TextView>()
         val actions = mutableListOf<() -> Unit>()
@@ -731,7 +742,6 @@ class PlayerActivity : Activity() {
         paintMenu()
         trackPanel.visibility = View.VISIBLE
         sheet.visibility = View.GONE
-        titleView.visibility = View.GONE
     }
 
     /** A row that the menu paints, not one the focus system owns. */
@@ -740,6 +750,8 @@ class PlayerActivity : Activity() {
         setTextColor(Color.parseColor(INK))
         textSize = 18f
         setPadding(22, 16, 30, 16)
+        maxLines = 1
+        ellipsize = android.text.TextUtils.TruncateAt.END
         background = GradientDrawable().apply {
             setColor(Color.TRANSPARENT)
             cornerRadius = 12f
@@ -754,7 +766,10 @@ class PlayerActivity : Activity() {
             val chosen = index == menuIndex
             row.setBackgroundColor(if (chosen) Color.parseColor("#232b36") else Color.TRANSPARENT)
             row.setTextColor(Color.parseColor(if (chosen) ACCENT else INK))
-            if (chosen) trackPanel.smoothScrollTo(0, maxOf(0, row.top - dp(120)))
+            if (chosen) {
+                val room = trackPanel.height - row.height - dp(24)
+                trackPanel.scrollTo(0, (row.top - dp(60)).coerceIn(0, maxOf(0, room)))
+            }
         }
     }
 
@@ -777,7 +792,6 @@ class PlayerActivity : Activity() {
         trackPanel.visibility = View.GONE
         trackList.removeAllViews()
         sheet.visibility = View.VISIBLE
-        titleView.visibility = View.VISIBLE
         showControls()
     }
 
