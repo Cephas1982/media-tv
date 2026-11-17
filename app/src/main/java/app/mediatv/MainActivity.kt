@@ -2,19 +2,32 @@ package app.mediatv
 
 import android.app.Activity
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Color
+import android.graphics.Typeface
 import android.os.Bundle
+import android.os.Handler
+import android.os.SystemClock
+import android.os.Looper
 import android.speech.RecognizerIntent
 import android.speech.SpeechRecognizer
 import android.util.Log
+import android.view.Gravity
 import android.view.KeyEvent
+import android.view.View
 import android.webkit.ConsoleMessage
 import android.webkit.JavascriptInterface
 import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
+import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.ProgressBar
+import android.widget.TextView
 import org.json.JSONObject
 import java.util.Locale
 
@@ -33,10 +46,45 @@ class MainActivity : Activity() {
         private const val APP_PREFIX = "http://192.168.1.121:3012/"
         private const val SPEECH_REQUEST = 101
         private const val HOLD_MS = 520L
+        private const val RETRY_MS = 5000L
+        private const val LOAD_GRACE_MS = 8000L
         private const val TAG = "MediaTV"
     }
 
     private lateinit var web: WebView
+    private lateinit var root: FrameLayout
+
+    // The platform's own failure page ("Webpage not available … ERR_CONNECTION_TIMED_OUT")
+    // is what a viewer saw for a whole evening: the page could not be reached at launch and
+    // the WebView never tries again. A load that fails now puts this screen up instead, and
+    // it keeps retrying until the box is reachable, so a dropped connection looks like the
+    // app waiting rather than like debugging output.
+    private lateinit var offline: LinearLayout
+    private var loadFailed = false
+    // A load that never finishes is the failure this box actually has: when the page cannot
+    // be reached the connection hangs rather than refuses, and the platform says nothing for
+    // half a minute. The watchdog turns that silence into the same waiting screen.
+    private var pageShown = false
+    // Which attempt is the current one, and when a load last finished. A late error from an
+    // attempt the viewer already moved past must not cover a page that has since arrived.
+    private var loadStartedAt = 0L
+    private var lastLoadedAt = 0L
+    // onPageFinished also fires for the platform's own error page, so a finish only counts
+    // as a page when no failure was reported during that same attempt.
+    private var lastErrorAt = 0L
+    private val watchdog = Runnable {
+        if (!pageShown) {
+            Log.w(TAG, "nothing finished in " + LOAD_GRACE_MS + "ms")
+            showOffline()
+        }
+    }
+    private val retryHandler = Handler(Looper.getMainLooper())
+    private val retry = Runnable {
+        if (loadFailed) {
+            Log.d(TAG, "retrying " + HOME_URL)
+            web.loadUrl(HOME_URL)
+        }
+    }
 
     // While a speech sheet is up it owns the screen, so this window keeps its hands off the
     // focus: taking focus back from a recogniser that draws itself over us is one way a
@@ -117,6 +165,56 @@ class MainActivity : Activity() {
                     view.postDelayed({
                         if (appPage) callJs("window.tvClaim && window.tvClaim()")
                     }, 250)
+                    // A clean finish is the proof that the box is reachable: trust it and
+                    // take the waiting screen down, whatever an earlier attempt said.
+                    if (url.startsWith(APP_PREFIX) && lastErrorAt < loadStartedAt) {
+                        pageShown = true
+                        lastLoadedAt = SystemClock.uptimeMillis()
+                        retryHandler.removeCallbacks(watchdog)
+                        showOnline()
+                    }
+                }
+
+                override fun onPageStarted(view: WebView, url: String, favicon: Bitmap?) {
+                    if (!url.startsWith(APP_PREFIX)) return
+                    // A retry starts from the waiting screen; it stays up until the page
+                    // really arrives, so a second hang never flashes black at the viewer.
+                    pageShown = false
+                    loadStartedAt = SystemClock.uptimeMillis()
+                    retryHandler.removeCallbacks(watchdog)
+                    retryHandler.postDelayed(watchdog, LOAD_GRACE_MS)
+                }
+
+                override fun onReceivedError(
+                    view: WebView,
+                    request: WebResourceRequest,
+                    error: WebResourceError,
+                ) {
+                    if (!request.isForMainFrame) return
+                    Log.w(TAG, "load failed: " + error.errorCode + " " + error.description)
+                    showOffline()
+                }
+
+                @Deprecated("Deprecated in Java")
+                override fun onReceivedError(
+                    view: WebView,
+                    errorCode: Int,
+                    description: String,
+                    failingUrl: String,
+                ) {
+                    if (!failingUrl.startsWith(APP_PREFIX)) return
+                    Log.w(TAG, "load failed: " + errorCode + " " + description)
+                    showOffline()
+                }
+
+                override fun onReceivedHttpError(
+                    view: WebView,
+                    request: WebResourceRequest,
+                    response: WebResourceResponse,
+                ) {
+                    if (!request.isForMainFrame || response.statusCode < 500) return
+                    Log.w(TAG, "load failed: HTTP " + response.statusCode)
+                    showOffline()
                 }
             }
             webChromeClient = object : WebChromeClient() {
@@ -132,7 +230,87 @@ class MainActivity : Activity() {
             android.webkit.CookieManager.getInstance().setAcceptCookie(true)
         }
 
-        setContentView(web)
+        offline = buildOfflineView()
+        root = FrameLayout(this).apply {
+            setBackgroundColor(Color.parseColor("#0b0d11"))
+            addView(web, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+            addView(offline, FrameLayout.LayoutParams(
+                FrameLayout.LayoutParams.MATCH_PARENT, FrameLayout.LayoutParams.MATCH_PARENT))
+        }
+        setContentView(root)
+        web.loadUrl(HOME_URL)
+        retryHandler.postDelayed(watchdog, LOAD_GRACE_MS)
+    }
+
+    /**
+     * What fills the screen when the page cannot be reached: one plain sentence, a spinner,
+     * and the promise that it will go away by itself. No address, no error code — a viewer
+     * should never have to read one.
+     */
+    private fun buildOfflineView(): LinearLayout {
+        fun dp(value: Int) = (value * resources.displayMetrics.density).toInt()
+        val box = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.CENTER
+            setBackgroundColor(Color.parseColor("#0b0d11"))
+            setPadding(dp(64), dp(64), dp(64), dp(64))
+            visibility = View.GONE
+            isFocusable = false
+        }
+        val title = TextView(this).apply {
+            text = "Can't reach the library"
+            setTextColor(Color.parseColor("#f2f4f8"))
+            textSize = 34f
+            typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            gravity = Gravity.CENTER
+            isFocusable = false
+        }
+        val hint = TextView(this).apply {
+            text = "Trying again — this goes away by itself."
+            setTextColor(Color.parseColor("#8b93a3"))
+            textSize = 20f
+            gravity = Gravity.CENTER
+            setPadding(0, dp(16), 0, 0)
+            isFocusable = false
+        }
+        val spinner = ProgressBar(this).apply {
+            layoutParams = LinearLayout.LayoutParams(dp(48), dp(48)).apply { topMargin = dp(28) }
+            isFocusable = false
+        }
+        box.addView(title)
+        box.addView(hint)
+        box.addView(spinner)
+        return box
+    }
+
+    private fun showOffline() {
+        // The current attempt already produced a page: a stale failure is not news.
+        if (lastLoadedAt > loadStartedAt) {
+            Log.d(TAG, "ignoring a failure from an earlier attempt")
+            return
+        }
+        loadFailed = true
+        lastErrorAt = SystemClock.uptimeMillis()
+        if (this::offline.isInitialized) offline.visibility = View.VISIBLE
+        retryHandler.removeCallbacks(retry)
+        retryHandler.postDelayed(retry, RETRY_MS)
+    }
+
+    private fun showOnline() {
+        loadFailed = false
+        retryHandler.removeCallbacks(retry)
+        if (this::offline.isInitialized && offline.visibility != View.GONE) {
+            Log.d(TAG, "the library is reachable again")
+            offline.visibility = View.GONE
+        }
+    }
+
+    private fun retryNow() {
+        retryHandler.removeCallbacks(retry)
+        pageShown = false
+        retryHandler.removeCallbacks(watchdog)
+        retryHandler.postDelayed(watchdog, LOAD_GRACE_MS)
         web.loadUrl(HOME_URL)
     }
 
@@ -223,6 +401,14 @@ class MainActivity : Activity() {
     // for an arrow while the page has focus. dispatchKeyEvent comes first, which is the
     // only place this can be intercepted.
     override fun dispatchKeyEvent(event: KeyEvent): Boolean {
+        // With no page on screen the remote has nothing to drive: the centre button asks
+        // again now instead of waiting for the next automatic try, and Back still leaves.
+        if (loadFailed && event.keyCode != KeyEvent.KEYCODE_BACK) {
+            if (event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER && event.action == KeyEvent.ACTION_DOWN) {
+                retryNow()
+            }
+            return true
+        }
         // The centre button is where "press" and "hold" differ, so it is taken here and
         // handed to the page either as tvLongPress() or as tvSelect().
         if (event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER && appPage) {
@@ -312,9 +498,18 @@ class MainActivity : Activity() {
         if (hasFocus && appPage && !listening) web.requestFocus()
     }
 
+    override fun onResume() {
+        super.onResume()
+        // A box that slept through the outage wakes to a screen that already knows the load
+        // failed; ask again as soon as the window is visible instead of waiting for the timer.
+        if (this::web.isInitialized && loadFailed) retryNow()
+    }
+
     override fun onDestroy() {
         listening = false
         web.removeCallbacks(holdJob)
+        retryHandler.removeCallbacks(retry)
+        retryHandler.removeCallbacks(watchdog)
         web.destroy()
         super.onDestroy()
     }
